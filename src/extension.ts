@@ -1,25 +1,59 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
+// src/extension.ts
+
 import * as vscode from "vscode";
+import * as path from "path";
+import * as fs from "fs";
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
-  // Use the console to output diagnostic information (console.log) and errors (console.error)
-  // This line of code will only be executed once when your extension is activated
-  console.log('Congratulations, your extension "clog" is now active!');
+  let disposable = vscode.commands.registerCommand("clog.openViteUI", () => {
+    // 1. Webview 패널 생성
+    const panel = vscode.window.createWebviewPanel(
+      "viteFrontendUI",
+      "GitHub Blog Creator UI", // 패널 제목
+      vscode.ViewColumn.Beside, // 에디터 옆에 새 패널을 띄웁니다.
+      {
+        enableScripts: true,
+        // Webview가 Vite 빌드 결과물을 읽을 수 있도록 권한 부여
+        localResourceRoots: [
+          vscode.Uri.file(
+            path.join(context.extensionPath, "webview-ui", "dist")
+          ),
+        ],
+      }
+    );
 
-  // The command has been defined in the package.json file
-  // Now provide the implementation of the command with registerCommand
-  // The commandId parameter must match the command field in package.json
-  const disposable = vscode.commands.registerCommand("clog.helloWorld", () => {
-    // The code you place here will be executed every time your command is executed
-    // Display a message box to the user
-    vscode.window.showInformationMessage("Hello World from Clog!");
+    // 2. 빌드된 HTML 파일 경로 설정 및 내용 읽기
+    const htmlPath = path.join(
+      context.extensionPath,
+      "webview-ui",
+      "dist",
+      "index.html"
+    );
+    if (!fs.existsSync(htmlPath)) {
+      vscode.window.showErrorMessage(
+        'Vite UI 빌드 파일을 찾을 수 없습니다. "pnpm run webview:build"를 먼저 실행해주세요.'
+      );
+      return;
+    }
+    let htmlContent = fs.readFileSync(htmlPath, "utf8");
+
+    // 3. Webview URI 변환 (가장 중요)
+    // Vite 빌드 자산의 상대 경로('./assets...')를 Webview가 이해하는 절대 URI로 변환
+    const distPath = path.join(context.extensionPath, "webview-ui", "dist");
+    const distUri = panel.webview
+      .asWebviewUri(vscode.Uri.file(distPath))
+      .toString();
+
+    // HTML 내용 내의 모든 상대 경로('./')를 Webview URI로 변경합니다.
+    htmlContent = htmlContent.replace(/href="\.\//g, `href="${distUri}/`);
+    htmlContent = htmlContent.replace(/src="\.\//g, `src="${distUri}/`);
+
+    panel.webview.html = htmlContent;
+
+    // ⭐️ 이후 단계: 코어와 Webview 간의 메시징 통신은 여기에 추가됩니다.
   });
 
   context.subscriptions.push(disposable);
 }
 
-// This method is called when your extension is deactivated
 export function deactivate() {}

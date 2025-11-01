@@ -14,8 +14,8 @@
   "contributes": {
     "commands": [
       {
-        "command": "clog.helloWorld",
-        "title": "Hello World"
+            "command": "clog.openViteUI",
+            "title": "Open GitHub Blog UI"
       }
     ]
   },
