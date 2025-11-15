@@ -13,7 +13,7 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.ViewColumn.Beside, // 에디터 옆에 새 패널을 띄웁니다.
       {
         enableScripts: true,
-        // Webview가 Vite 빌드 결과물을 읽을 수 있도록 권한 부여
+
         localResourceRoots: [
           vscode.Uri.file(
             path.join(context.extensionPath, "webview-ui", "dist")
@@ -47,6 +47,12 @@ export function activate(context: vscode.ExtensionContext) {
     // HTML 내용 내의 모든 상대 경로('./')를 Webview URI로 변경합니다.
     htmlContent = htmlContent.replace(/href="\.\//g, `href="${distUri}/`);
     htmlContent = htmlContent.replace(/src="\.\//g, `src="${distUri}/`);
+
+    // Vite 빌드가 절대 경로('/assets/...')를 생성하는 경우도 있으므로
+    // 절대 경로로 시작하는 asset 경로도 Webview URI로 변환합니다.
+    // 예: href="/assets/..."  -> href="${distUri}/assets/..."
+    htmlContent = htmlContent.replace(/href="\//g, `href="${distUri}/`);
+    htmlContent = htmlContent.replace(/src="\//g, `src="${distUri}/`);
 
     panel.webview.html = htmlContent;
 
