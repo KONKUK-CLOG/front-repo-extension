@@ -20,9 +20,16 @@ export function openPreviewPanel(extensionUri: vscode.Uri) {
   // 미리보기에서 메시지 받기
   panel.webview.onDidReceiveMessage((message) => {
     if (message.type === "createBlog") {
+      // 편집된 내용 포함
+      const editedContent = message.content || "";
+
       vscode.window.showInformationMessage(
         "블로그 포스트가 GitHub에 발행되었습니다! (추후 구현)"
       );
+
+      // 편집된 내용을 로그로 출력 (디버깅용)
+      console.log("Edited blog content:", editedContent);
+
       panel.dispose();
     }
   });
