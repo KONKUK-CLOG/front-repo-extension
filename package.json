@@ -12,10 +12,49 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "clog-sidebar",
+          "title": "Clog",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "clog-sidebar": [
+        {
+          "type": "webview",
+          "id": "clog.sidebarView",
+          "name": "Chat"
+        }
+      ]
+    },
     "commands": [
       {
-            "command": "clog.openViteUI",
-            "title": "Open GitHub Blog UI"
+        "command": "clog.openViteUI",
+        "title": "Open Clog Sidebar"
+      },
+      {
+        "command": "clog.sendCodeToWebview",
+        "title": "Send Code to Blog Creator"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "clog.sendCodeToWebview",
+          "when": "editorHasSelection",
+          "group": "1_modification"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "clog.sendCodeToWebview",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "editorTextFocus && editorHasSelection"
       }
     ]
   },

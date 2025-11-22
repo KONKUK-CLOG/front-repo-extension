@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import LoginScreen from './components/LoginScreen';
-import EditorScreen from './components/EditorScreen';
+import LoginScreen from './pages/Login/LoginScreen';
+import EditorScreen from './pages/Editor/EditorScreen';
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -11,22 +11,12 @@ function App() {
     setIsLoggedIn(true);
   };
 
-  const handlePublish = () => {
-    // TODO: VS Code extension과 통신하여 GitHub에 포스트 발행
-    console.log('포스트 발행');
-  };
-
-  const handleSave = () => {
-    // TODO: VS Code extension과 통신하여 임시저장
-    console.log('임시저장');
-  };
-
   return (
     <>
       {!isLoggedIn ? (
         <LoginScreen onLogin={handleLogin} />
       ) : (
-        <EditorScreen onPublish={handlePublish} onSave={handleSave} />
+        <EditorScreen />
       )}
     </>
   );
