@@ -6,19 +6,21 @@ import { ClogSidebarProvider } from "./providers/ClogSidebarProvider";
  */
 export function activate(context: vscode.ExtensionContext) {
   // 사이드바 프로바이더 등록
-  registerSidebarProvider(context);
+  const provider = registerSidebarProvider(context);
 
   // 커맨드 등록
-  registerCommands(context);
+  registerCommands(context, provider);
 
   // 텍스트 선택 감지 등록
-  registerTextSelectionListener(context);
+  registerTextSelectionListener(context, provider);
 }
 
 /**
  * 사이드바 프로바이더 등록
  */
-function registerSidebarProvider(context: vscode.ExtensionContext) {
+function registerSidebarProvider(
+  context: vscode.ExtensionContext,
+): ClogSidebarProvider {
   const provider = new ClogSidebarProvider(context.extensionUri, context);
 
   context.subscriptions.push(
@@ -26,37 +28,41 @@ function registerSidebarProvider(context: vscode.ExtensionContext) {
       webviewOptions: {
         retainContextWhenHidden: true,
       },
-    })
+    }),
   );
 
-  // 다른 함수에서 사용할 수 있도록 저장
-  (context as any).clogProvider = provider;
+  return provider;
 }
 
 /**
  * 커맨드 등록
  */
-function registerCommands(context: vscode.ExtensionContext) {
+function registerCommands(
+  context: vscode.ExtensionContext,
+  provider: ClogSidebarProvider,
+) {
   // 사이드바 열기
   context.subscriptions.push(
     vscode.commands.registerCommand("clog.openViteUI", () => {
       vscode.commands.executeCommand("clog.sidebarView.focus");
-    })
+    }),
   );
 
   // 선택된 코드를 웹뷰로 보내기
   context.subscriptions.push(
     vscode.commands.registerCommand("clog.sendCodeToWebview", () => {
-      const provider = (context as any).clogProvider as ClogSidebarProvider;
       provider.sendSelectedCode();
-    })
+    }),
   );
 }
 
 /**
  * 텍스트 선택 변경 감지 (자동 코드 전송)
  */
-function registerTextSelectionListener(context: vscode.ExtensionContext) {
+function registerTextSelectionListener(
+  context: vscode.ExtensionContext,
+  provider: ClogSidebarProvider,
+) {
   let selectionTimeout: NodeJS.Timeout | undefined;
 
   context.subscriptions.push(
@@ -68,13 +74,12 @@ function registerTextSelectionListener(context: vscode.ExtensionContext) {
         clearTimeout(selectionTimeout);
       }
 
-      const provider = (context as any).clogProvider as ClogSidebarProvider;
       if (!selection.isEmpty && provider.view) {
         selectionTimeout = setTimeout(() => {
           provider.sendSelectedCode();
         }, 800);
       }
-    })
+    }),
   );
 }
 
