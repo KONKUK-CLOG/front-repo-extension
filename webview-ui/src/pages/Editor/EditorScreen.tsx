@@ -231,6 +231,71 @@ const EmptyState = styled.div`
   }
 `;
 
+const DiffPanel = styled.section`
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.9rem;
+  border: 1px solid #3e3e42;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(14, 99, 156, 0.18), rgba(30, 30, 30, 0.92));
+`;
+
+const DiffPanelHeader = styled.div`
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+`;
+
+const DiffPanelTitle = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+
+  h2 {
+    font-size: 0.98rem;
+    font-weight: 600;
+    color: #ffffff;
+  }
+
+  p {
+    font-size: 0.8rem;
+    color: #9da4ad;
+    line-height: 1.4;
+  }
+`;
+
+const DiffStatusBadge = styled.span<{ $tone: 'idle' | 'success' | 'warning' | 'error' }>`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+  border: 1px solid
+    ${props => props.$tone === 'success' ? '#2da44e' : props.$tone === 'warning' ? '#d29922' : props.$tone === 'error' ? '#f85149' : '#3e3e42'};
+  color: ${props => props.$tone === 'success' ? '#7ee787' : props.$tone === 'warning' ? '#f2cc60' : props.$tone === 'error' ? '#ffa198' : '#c9d1d9'};
+  background: ${props => props.$tone === 'success' ? 'rgba(45, 164, 78, 0.14)' : props.$tone === 'warning' ? 'rgba(210, 153, 34, 0.12)' : props.$tone === 'error' ? 'rgba(248, 81, 73, 0.12)' : 'rgba(110, 118, 129, 0.12)'};
+`;
+
+const DiffPanelBody = styled.pre`
+  margin: 0;
+  padding: 0.9rem;
+  border-radius: 8px;
+  background: #0f111a;
+  border: 1px solid #2d333b;
+  color: #c9d1d9;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  max-height: 240px;
+`;
+
 interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -246,6 +311,13 @@ interface Attachment {
   data: string;
 }
 
+interface DiffState {
+  title: string;
+  details: string;
+  content: string;
+  tone: 'idle' | 'success' | 'warning' | 'error';
+}
+
 export default function EditorScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -253,19 +325,28 @@ export default function EditorScreen() {
   const [pendingCode, setPendingCode] = useState<Attachment | null>(null);
   const [isThinking, setIsThinking] = useState(false);
   const [thinkingSteps, setThinkingSteps] = useState<string[]>([]);
+  const [snapshotSummary, setSnapshotSummary] = useState('로그인하면 현재 열린 코드의 스냅샷을 저장합니다.');
+  const [diffState, setDiffState] = useState<DiffState>({
+    title: 'diff 대기 중',
+    details: 'Ctrl+S를 누르면 저장된 기준 코드와 현재 코드의 차이를 보여줍니다.',
+    content: '로그인 후 기준 코드가 저장되면 여기에 diff가 표시됩니다.',
+    tone: 'idle',
+  });
 
   // VS Code API 초기화
   useEffect(() => {
     if (typeof window.acquireVsCodeApi === 'function' && !window.vscode) {
       window.vscode = window.acquireVsCodeApi();
     }
+
+    window.vscode?.postMessage({ type: 'requestSnapshotState' });
   }, []);
 
   // VS Code extension으로부터 메시지 받기
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       const message = event.data;
-      
+
       if (message.type === 'codePending') {
         // Extension에서 보낸 코드를 임시 칩으로 표시 (아직 추가 안됨)
         const tempAttachment: Attachment = {
@@ -275,6 +356,61 @@ export default function EditorScreen() {
           data: message.code,
         };
         setPendingCode(tempAttachment);
+        return;
+      }
+
+      if (message.type === 'snapshotReady') {
+        setSnapshotSummary(`${message.fileName} 기준 코드를 저장했습니다.`);
+        setDiffState({
+          title: `${message.fileName} 저장 기준 준비됨`,
+          details: `파일: ${message.filePath ?? message.fileName}`,
+          content: '이후 Ctrl+S를 누르면 baseline과 현재 코드의 diff가 여기에 표시됩니다.',
+          tone: 'success',
+        });
+        return;
+      }
+
+      if (message.type === 'documentDiff') {
+        setSnapshotSummary(`${message.fileName} 저장 완료. diff를 갱신했습니다.`);
+        setDiffState({
+          title: `${message.fileName} diff`,
+          details: `마지막 저장: ${new Date(message.savedAt).toLocaleString('ko-KR')}`,
+          content: message.patch || 'diff를 생성했지만 결과가 비어 있습니다.',
+          tone: 'warning',
+        });
+        return;
+      }
+
+      if (message.type === 'documentUnchanged') {
+        setSnapshotSummary(`${message.fileName} 저장 완료. 변경 사항이 없습니다.`);
+        setDiffState({
+          title: `${message.fileName} 변경 없음`,
+          details: '저장된 기준 코드와 현재 코드가 동일합니다.',
+          content: '현재 저장된 코드와 스냅샷이 완전히 같습니다.',
+          tone: 'idle',
+        });
+        return;
+      }
+
+      if (message.type === 'snapshotError') {
+        setSnapshotSummary(message.message);
+        setDiffState({
+          title: '기준 코드 저장 실패',
+          details: '활성 편집기를 찾지 못했습니다.',
+          content: message.message,
+          tone: 'error',
+        });
+        return;
+      }
+
+      if (message.type === 'snapshotMissing') {
+        setSnapshotSummary(message.message);
+        setDiffState({
+          title: '기준 코드 대기 중',
+          details: '로그인 후 기준 코드를 저장해야 diff를 볼 수 있습니다.',
+          content: message.message,
+          tone: 'idle',
+        });
       }
     };
 
@@ -355,6 +491,26 @@ export default function EditorScreen() {
   return (
     <EditorContainer>
       <Content>
+        <DiffPanel>
+          <DiffPanelHeader>
+            <DiffPanelTitle>
+              <h2>{diffState.title}</h2>
+              <p>{diffState.details}</p>
+            </DiffPanelTitle>
+            <DiffStatusBadge $tone={diffState.tone}>
+              {diffState.tone === 'success'
+                ? 'baseline 저장'
+                : diffState.tone === 'warning'
+                  ? 'diff 생성'
+                  : diffState.tone === 'error'
+                    ? '에러'
+                    : '대기 중'}
+            </DiffStatusBadge>
+          </DiffPanelHeader>
+          <div style={{ fontSize: '0.82rem', color: '#9da4ad' }}>{snapshotSummary}</div>
+          <DiffPanelBody>{diffState.content}</DiffPanelBody>
+        </DiffPanel>
+
         <ConversationArea>
           {messages.length === 0 ? (
             <EmptyState>

@@ -13,6 +13,9 @@ export function activate(context: vscode.ExtensionContext) {
 
   // 텍스트 선택 감지 등록
   registerTextSelectionListener(context, provider);
+
+  // 저장 시 diff 생성 등록
+  registerSaveListener(context, provider);
 }
 
 /**
@@ -79,6 +82,20 @@ function registerTextSelectionListener(
           provider.sendSelectedCode();
         }, 800);
       }
+    }),
+  );
+}
+
+/**
+ * 저장 이벤트 감지
+ */
+function registerSaveListener(
+  context: vscode.ExtensionContext,
+  provider: ClogSidebarProvider,
+) {
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument((document) => {
+      provider.handleDocumentSave(document);
     }),
   );
 }
