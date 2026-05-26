@@ -3,6 +3,7 @@
   "displayName": "Clog",
   "description": "A basic utility for learning VS Code extension development.",
   "version": "0.0.1",
+  "publisher": "clog",
   "engines": {
     "vscode": "^1.105.0"
   },
@@ -83,14 +84,15 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "pnpm run compile",
+    "vscode:prepublish": "node esbuild.mjs",
+    "bundle": "node esbuild.mjs",
     "webview:build": "cd webview-ui && pnpm run build",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "pnpm run compile && pnpm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "package": "pnpm run webview:build && vsce package --no-dependencies --no-rewrite-relative-links --allow-missing-repository"
+    "package": "pnpm run webview:build && vsce package --no-dependencies --no-rewrite-relative-links --allow-missing-repository --follow-symlinks"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -101,6 +103,7 @@
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.28.0",
     "eslint": "^9.36.0",
     "typescript": "^5.9.3"
   },

@@ -12,10 +12,16 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+out/test/**
 
-# Dependencies (pnpm symlinks break vsce zip)
+# Dependencies bundled into out/extension.js
 node_modules/**
 webview-ui/node_modules/**
+
+# Extension host: single bundle only (vscode:prepublish)
+out/**
+!out/extension.js
+esbuild.mjs
 
 # Webview: ship built assets only
 webview-ui/src/**

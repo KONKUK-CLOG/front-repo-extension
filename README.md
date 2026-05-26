@@ -1,282 +1,136 @@
 # Clog — VS Code Extension
 
-코드 편집 맥락을 바탕으로 AI 블로그 초안을 생성·미리보기·발행하는 VS Code 확장 프로그램입니다.  
-백엔드 API(`clog-api`), 웹 프론트(S3 SPA), Extension이 분리되어 있으며, Extension은 **API 서버**와 **프론트 공개 URL**을 각각 다른 설정으로 바라봅니다.
+**IDE를 벗어나지 않고**, 작성 중인 코드와 프로젝트 맥락을 바탕으로 **기술 블로그 초안을 생성·편집·발행**하는 VS Code 확장 프로그램입니다.
+
+CLOG(Code + Log)는 건국대학교 컴퓨터공학부 졸업프로젝트로 개발된 **개발자 전용 AI 블로그 작성 플랫폼**의 일부이며, 본 Extension은 그 흐름의 **시작점(IDE)** 역할을 담당합니다.
+
+| 서비스 | URL |
+|--------|-----|
+| **웹 블로그** (발행 글 열람) | http://clog-frontend-project.s3-website.ap-northeast-2.amazonaws.com |
+| **백엔드 API** | https://clog.r-e.kr |
 
 ---
 
-## 목차
+## CLOG가 해결하는 문제
 
-1. [개요](#개요)
-2. [시스템 구성](#시스템-구성)
-3. [기술 스택](#기술-스택)
-4. [프로젝트 구조](#프로젝트-구조)
-5. [백엔드 API 연동](#백엔드-api-연동)
-6. [인증](#인증)
-7. [프로젝트·파일 동기화](#프로젝트파일-동기화)
-8. [채팅·SSE 블로그 생성](#채팅sse-블로그-생성)
-9. [블로그 미리보기·발행](#블로그-미리보기발행)
-10. [설정](#설정)
-11. [개발·디버깅](#개발디버깅)
-12. [배포 체크리스트](#배포-체크리스트)
-13. [트러블슈팅](#트러블슈팅)
-14. [라이선스](#라이선스)
+일반 LLM 채팅은 코드를 직접 붙여 넣지 않으면 프로젝트 구조를 모르고, 여러 프로젝트를 한 세션에서 다루면 **이전 프로젝트 코드·대화가 섞이는 컨텍스트 오염**이 생깁니다.
 
----
+CLOG Extension은 다음을 통해 **「이 프로젝트의 이 시점」** 맥락을 시스템이 유지하도록 돕습니다.
 
-## 개요
-
-| 항목 | 설명 |
+| 강점 | 설명 |
 |------|------|
-| **대상 사용자** | VS Code에서 작업하는 개발자 |
-| **핵심 가치** | 선택/저장된 코드 → LLM 블로그 초안 → 편집 → 공개 URL 발행 |
-| **UI** | Activity Bar **Clog** 사이드바(React Webview) + **Blog Preview** 패널 |
-| **백엔드** | Spring Boot (`https://clog.r-e.kr` 등) |
-| **프론트** | S3 정적 호스팅 SPA (`/#/blog/{id}`) |
+| **프로젝트별 코드베이스 격리** | 워크스페이스 파일을 프로젝트 단위로 서버에 동기화하고, AI는 해당 `projectId`의 코드만 검색·참조합니다. |
+| **프로젝트별 채팅 세션** | 프로젝트마다 별도 채팅 세션이 유지되어, 다른 레포 작업 내용이 블로그 생성에 섞이지 않습니다. |
+| **BM25 기반 코드 검색** | 별도 Vector DB 없이 식별자 중심 검색으로 관련 코드 근거를 찾아 초안에 반영합니다. |
+| **작성자 톤 반영** | 기존에 발행한 블로그 글 스타일을 참고해, 개인적인 글쓰기 톤에 맞춘 초안을 생성합니다. |
+| **IDE 안에서 끝까지** | GitHub 로그인 → 코드 동기화 → AI 채팅 → TipTap 미리보기 → 웹 발행까지 **VS Code 안**에서 완료합니다. |
+| **효율적인 동기화** | 로그인 직후 전체 텍스트 파일을 업로드하고, 이후 **Ctrl+S** 시에는 변경분만 **unified diff**로 전송합니다. |
 
-### 주요 기능
-
-- GitHub OAuth 세션(`gho_`) → CLOG JWT 교환 후 사이드바 채팅
-- 워크스페이스 소스 파일 **최초 일괄 업로드** + **Ctrl+S 시 unified diff** 동기화
-- `POST /api/blogs/generate` SSE 스트리밍(assistant + 마크다운 미리보기)
-- WYSIWYG 미리보기에서 **블로그 만들기** → `POST /api/blogs/extension/publish`
-- 발행 링크: 프론트 S3 origin + `/#/blog/{blogId}` (API 도메인과 분리)
+> 백엔드(Spring Boot), AI 서비스(AWS Lambda), 웹 블로그(React SPA)는 별도로 배포·운영됩니다. Extension은 **API**와 **발행 글용 웹 URL**만 설정으로 연결합니다.
 
 ---
 
-## 시스템 구성
+## 빠른 시작
 
-```mermaid
-flowchart LR
-  subgraph vscode [VS Code Extension]
-    Sidebar[Clog Sidebar Webview]
-    Preview[Blog Preview Panel]
-    Cache[project-sync-cache.json]
-  end
+### 1. 설치
 
-  subgraph api [clog-api]
-    Auth["POST /api/auth/github/token"]
-    Projects["/api/projects/.../files"]
-    SSE["POST /api/blogs/generate"]
-    Publish["POST /api/blogs/extension/publish"]
-  end
+- VS Code **Extensions**에서 **Clog** 검색 후 설치  
+  *(또는 배포된 `.vsix`를 **Install from VSIX**로 설치)*
 
-  subgraph front [S3 Frontend SPA]
-    BlogPage["/#/blog/{id}"]
-  end
+### 2. 워크스페이스 열기
 
-  Sidebar --> Auth
-  Sidebar --> Projects
-  Sidebar --> SSE
-  Preview --> Publish
-  Cache --> Projects
-  Publish --> BlogPage
-```
+블로그로 다룰 **프로젝트 폴더**를 VS Code에서 연 뒤, Activity Bar의 **Clog** 아이콘을 클릭합니다.
 
-| 구분 | URL 예시 | 역할 |
-|------|----------|------|
-| API | `https://clog.r-e.kr` | JWT, 프로젝트 파일, SSE, 발행 API |
-| 프론트 | `http://clog-frontend-project.s3-website.ap-northeast-2.amazonaws.com` | 발행 글 **읽기** (hash 라우트) |
+### 3. GitHub 로그인
 
-> `clog.r-e.kr/#/blog/1` 로 열면 API 서버가 SPA를 제공하지 않아 **403 Whitelabel** 이 날 수 있습니다. 발행 링크는 반드시 **프론트 origin** 을 사용합니다.
+사이드바에서 **GitHub 로그인**을 진행합니다. VS Code에 연결된 GitHub 계정(`gho_` 세션)으로 CLOG JWT가 발급되며, 로그인 직후 **워크스페이스 파일이 서버에 초기 동기화**됩니다.
 
----
+### 4. 블로그 초안 만들기
 
-## 기술 스택
+1. 설명하고 싶은 **코드를 선택**한 뒤 `Ctrl+Shift+B` (macOS: `Cmd+Shift+B`)로 채팅에 첨부하거나, 사이드바에 직접 프롬프트를 입력합니다.
+2. AI가 **답변**과 함께 **블로그 마크다운 초안**을 스트리밍으로 보여 줍니다.
+3. **Blog Preview** 패널이 열리면 TipTap 에디터에서 내용을 다듬습니다.
+4. **「블로그 만들기」**를 누르면 웹 블로그에 발행되고, **공개 URL**이 표시됩니다.
 
-| 영역 | 기술 |
-|------|------|
-| Extension | TypeScript, VS Code Extension API |
-| Webview UI | React 19, Emotion, Vite |
-| HTTP/SSE | `fetch` + `ReadableStream` (EventSource 미사용) |
-| Diff | npm `diff` (createPatch), 서버 `contentDiff` 적용 |
-| 패키지 매니저 | pnpm |
-
----
-
-## 프로젝트 구조
-
-```
-clog/                          # VS Code Extension (본 저장소)
-├── src/
-│   ├── extension.ts           # 진입점, WebviewProvider·저장 리스너 등록
-│   ├── providers/
-│   │   └── ClogSidebarProvider.ts   # 인증, SSE, 동기화, 발행 오케스트레이션
-│   ├── api/
-│   │   ├── client.ts          # Bearer JWT, 요청/응답 로깅
-│   │   ├── auth.ts            # GitHub 토큰 → JWT
-│   │   ├── projects.ts        # 프로젝트·파일 CRUD
-│   │   ├── blogs.ts           # SSE generate, extension publish
-│   │   ├── sse.ts             # Spec A 이벤트 파싱
-│   │   ├── blogUrl.ts         # 발행 공개 URL (#/blog/{id})
-│   │   ├── tokenStorage.ts    # SecretStorage + globalState
-│   │   └── apiProbe.ts        # 연동 스모크 테스트
-│   ├── sync/
-│   │   ├── workspaceFiles.ts  # findFiles (최대 20개, 50KB)
-│   │   ├── projectSync.ts     # Initial POST / Ctrl+S PUT diff
-│   │   └── projectSyncCache.ts
-│   └── utils/
-│       ├── previewPanel.ts    # Blog Preview + 발행 버튼
-│       └── previewHtml.ts
-└── webview-ui/                # 사이드바 React 앱 → dist/
-
-backend-repo/                  # Spring Boot API (별도 저장소)
-└── docs/API_SPEC.md           # API 상세 명세
-```
-
----
-
-## 백엔드 API 연동
-
-Extension **전용·공유** API 기준 적용 현황입니다.
-
-### 4.1 인증·프로필
-
-| Method | Path | Extension 사용 | 비고 |
-|--------|------|----------------|------|
-| POST | `/api/auth/github/token` | ✅ | VS Code `gho_` → CLOG JWT |
-| GET | `/api/users/{userId}` | ❌ | JWT `sub`는 디버그 로그만 |
-
-### 4.2 프로젝트·파일 (MongoDB)
-
-| Method | Path | Extension 사용 | 비고 |
-|--------|------|----------------|------|
-| POST | `/api/projects` | ✅ | 워크스페이스명으로 프로젝트 생성/조회 |
-| GET | `/api/projects` | ✅ | `ensureWorkspaceProject` |
-| DELETE | `/api/projects/{projectId}` | ❌ | 래퍼만 존재 |
-| POST | `/api/projects/{projectId}/files` | ✅ | **최초 동기화** 신규 파일 |
-| GET | `/api/projects/{projectId}/files` | ✅ | 목록 (content 없음) |
-| PUT | `/api/projects/{projectId}/files/{fileId}` | ✅ | **Ctrl+S** `contentDiff` 또는 전체 `content` |
-| DELETE | `/api/projects/{projectId}/files/{fileId}` | ❌ | — |
-
-### 4.3 채팅·발행·생성
-
-| Method | Path | Extension 사용 | 비고 |
-|--------|------|----------------|------|
-| POST | `/api/chat/send` | ❌ | 코드에 `streamChatSend`만 있음; **실제 UI는 `/api/blogs/generate`** |
-| POST | `/api/blogs/extension/publish` | ✅ | 미리보기 「블로그 만들기」 |
-| POST | `/api/blogs/generate` | ✅ | 사이드바 채팅 SSE |
-
-### Extension이 사용하지 않는 API (Web·기타)
-
-- `GET /api/auth/github/callback`
-- 블로그 DRAFT CRUD, 피드, 댓글, 북마크, 퀴즈
-- `GET /api/v1/blog/posts`
-
----
-
-## 인증
-
-```mermaid
-sequenceDiagram
-  participant U as 사용자
-  participant VS as VS Code GitHub Auth
-  participant W as Clog Webview
-  participant E as Extension
-  participant API as clog-api
-
-  U->>W: GitHub 로그인
-  W->>E: loginRequest
-  E->>VS: getSession(gho_)
-  VS-->>E: githubAccessToken
-  E->>API: POST /api/auth/github/token
-  API-->>E: accessToken (JWT)
-  E->>E: SecretStorage 저장
-  E->>API: ensureWorkspaceProject
-  E->>E: syncEntireWorkspace (POST files)
-```
-
-| 저장소 | 키 | 내용 |
-|--------|-----|------|
-| SecretStorage | `clog.accessToken` | CLOG JWT |
-| globalState | `clog.projectId` | 워크스페이스 프로젝트 ID |
-| globalState | `clog.chatSessionId` | SSE `done.sessionId` |
-| storageUri | `clog-project-sync-cache.json` | 파일별 baseline·fileId·lastDiff |
-
-**로그인 조건:** GitHub 세션 + CLOG JWT 모두 있을 때 Editor 화면 표시.
-
----
-
-## 프로젝트·파일 동기화
-
-### 최초 동기화 (로그인·캐시 없음)
-
-1. `GET /api/projects/{projectId}/files` 로 서버 목록 조회
-2. 워크스페이스 **전체 파일** 수집 (`**/*`, `node_modules`·`.git` 등 제외, 바이너리·50KB 초과 제외)
-3. 서버에 없는 파일 → **`POST .../files`** (전체 `content`)
-4. 캐시에 `fileId`, `baselineContent` 저장
-
-### Ctrl+S 저장 시
-
-1. 캐시/`projectId` 없으면 Initial Sync 재시도
-2. 캐시에 없는 파일 → lazy **`POST .../files`**
-3. `baseline` vs 현재 내용 비교 → 변경 시 **`PUT .../files/{fileId}`** body `{ contentDiff: "<unified patch>" }`
-4. 서버가 patch를 적용해 `content` 갱신 (백엔드 `UnifiedDiffApplier`)
-5. 캐시 baseline·`lastDiff` 갱신; 발행 시 `codeDiff`로 누적 가능
-
-### 제한
-
-- 동기화 대상: 워크스페이스 **루트 안 모든 파일** (`clog.maxProjectSyncFiles`, 기본 10000)
-- 제외: `node_modules`, `.git`, `dist`, `build` 등 + 이미지·폰트·zip 등 바이너리 확장자
-- 파일당 최대 **50KB** (`app.project.max-file-bytes`)
-- 서버: `APP_PROJECT_MAX_FILES` (기본 **200**) — 파일 수가 더 많으면 서버 env를 올려야 함
-
----
-
-## 채팅·SSE 블로그 생성
-
-| 항목 | 값 |
-|------|-----|
-| 엔드포인트 | `POST /api/blogs/generate` |
-| 인증 | `Authorization: Bearer <JWT>` |
-| Body | `message`, `projectId`, `chatSessionId`, `codeSnippets` |
-| 클라이언트 | `fetch` + `ReadableStream` (EventSource 불가) |
-
-### SSE 이벤트 (Spec A)
-
-| event | UI 반영 |
-|-------|---------|
-| `started` / `iteration_*` | thinking 텍스트 |
-| `answer` (delta) | assistant 메시지 |
-| `blog` (delta) | 미리보기 마크다운 + Blog Preview 패널 |
-| `complete` / `done` | 스트림 종료, `sessionId` 저장 |
-
-### UI 안정화
-
-- `draftId`로 요청별 메시지 분리 (이전 요청 abort 시 오류 문구 미표시)
-- 한글 IME 조합 중 Enter 전송 방지
-- 빈 assistant 말풍선 제거, 스트리밍 중 중복 전송 잠금
-
----
-
-## 블로그 미리보기·발행
-
-1. SSE로 `previewMarkdown` 수신 → **Blog Preview** 패널 자동 오픈 (옆 탭)
-2. 사이드바 **「블로그 미리보기 · 만들기」** 로 재오픈 가능
-3. 에디터에서 HTML 편집 후 **「블로그 만들기」** 클릭
-4. `POST /api/blogs/extension/publish`  
-   - `title`, `content`(HTML), `visibility`, `chatSessionId`, `codeDiff`(선택)
-5. 공개 URL 생성 (Extension이 **항상 프론트 origin** 사용):
+발행된 글은 웹 블로그에서 확인합니다.
 
 ```
 http://clog-frontend-project.s3-website.ap-northeast-2.amazonaws.com/#/blog/{blogId}
 ```
 
-백엔드 `blogUrl` 필드가 API 도메인을 가리켜도 Extension·설정에서 S3 URL로 덮어씁니다.
+---
+
+## 주요 기능
+
+### GitHub OAuth 로그인
+
+VS Code 내장 GitHub 인증을 사용합니다. 별도 브라우저 OAuth 리다이렉트 없이 사이드바에서 로그인할 수 있습니다.
+
+### 워크스페이스 자동 동기화
+
+| 시점 | 동작 |
+|------|------|
+| **로그인 직후** | 워크스페이스의 텍스트 소스 파일을 서버에 일괄 업로드 (Initial Sync) |
+| **파일 저장 (Ctrl+S)** | 이전 baseline과 비교해 **변경분만 diff**로 서버에 반영 |
+
+`node_modules`, `.git`, `dist` 등과 이미지·바이너리는 제외됩니다. 파일당 최대 **50KB**까지 동기화됩니다.
+
+### AI 블로그 생성 (SSE)
+
+- 사이드바 채팅에서 프롬프트 전송 → `POST /api/blogs/generate` **SSE 스트리밍**
+- 진행 상태(thinking), assistant 답변, 블로그 미리보기 마크다운이 실시간으로 표시됩니다.
+- ReAct 기반 AI가 `search_codebase`, `get_user_blog_posts` 등 도구로 **코드 근거**와 **글 톤**을 수집한 뒤 초안을 작성합니다.
+
+### 미리보기 · 발행
+
+- SSE로 수신한 마크다운이 **Blog Preview** 패널(옆 탭)에 자동으로 열립니다.
+- HTML로 편집한 뒤 **「블로그 만들기」** → `POST /api/blogs/extension/publish`
+- 발행 링크는 **웹 블로그(S3 SPA) origin**을 사용합니다. API 도메인(`clog.r-e.kr`)으로 `/#/blog/...`를 열면 403이 날 수 있으니 주의하세요.
+
+---
+
+## 사용 흐름
+
+```mermaid
+flowchart LR
+  Login[GitHub 로그인]
+  Sync[Initial Sync / Ctrl+S diff]
+  Chat[코드 선택 + AI 채팅]
+  Preview[Blog Preview 편집]
+  Publish[블로그 만들기]
+  Web["웹 블로그 /#/blog/id"]
+
+  Login --> Sync --> Chat --> Preview --> Publish --> Web
+```
+
+**백엔드 처리 흐름 (참고):** Extension → Spring Boot(인증·세션) → AWS Lambda(AI/ReAct/BM25) → SSE로 Extension·미리보기에 스트리밍
+
+---
+
+## 명령어 · 단축키
+
+| 동작 | 방법 |
+|------|------|
+| Clog 사이드바 열기 | Activity Bar **Clog** 또는 명령 팔레트 `Clog: Open Sidebar` |
+| 선택 코드를 채팅에 보내기 | 에디터에서 코드 선택 → `Ctrl+Shift+B` / `Cmd+Shift+B` 또는 우클릭 메뉴 |
+| 블로그 미리보기 다시 열기 | 사이드바 **「블로그 미리보기 · 만들기」** |
+| API 연동 점검 (고급) | 명령 팔레트 `Clog: Run API Integration Probe` |
 
 ---
 
 ## 설정
 
-VS Code `settings.json`:
+기본값은 **운영 환경**을 가리킵니다. 로컬 API 개발 시에만 변경하세요.
 
-| 키 | 기본값 | 설명 |
-|----|--------|------|
-| `clog.apiBaseUrl` | `https://clog.r-e.kr` | **API** 베이스 URL |
-| `clog.blogPublicBaseUrl` | `http://clog-frontend-project.s3-website.ap-northeast-2.amazonaws.com` | **발행 글** SPA origin |
-| `clog.maxProjectSyncFiles` | `10000` | Initial sync 수집 상한 |
+**File → Preferences → Settings**에서 `clog` 검색:
 
-로컬 API 테스트:
+| 설정 키 | 기본값 | 설명 |
+|---------|--------|------|
+| `clog.apiBaseUrl` | `https://clog.r-e.kr` | CLOG 백엔드 API |
+| `clog.blogPublicBaseUrl` | `http://clog-frontend-project.s3-website.ap-northeast-2.amazonaws.com` | 발행 글 **웹 앱** origin (`/#/blog/{id}`) |
+| `clog.maxProjectSyncFiles` | `10000` | Initial Sync 시 수집할 파일 수 상한 |
+
+로컬 백엔드 예시:
 
 ```json
 {
@@ -286,9 +140,51 @@ VS Code `settings.json`:
 
 ---
 
-## 개발·디버깅
+## 디버그 로그 (문제 해결 시)
 
-### 설치·빌드
+**View → Output → `Clog API Debug`** 채널에서 다음 접두사를 확인할 수 있습니다.
+
+| 접두사 | 의미 |
+|--------|------|
+| `[Clog Auth]` | GitHub·JWT 로그인 상태 |
+| `[Initial Sync]` | 로그인 후 파일 일괄 업로드 |
+| `[Ctrl+S]` | 저장 시 diff 동기화 |
+| `[Clog SSE]` | AI 블로그 생성 스트림 |
+| `[Publish]` | 발행 API 결과 |
+
+---
+
+## 트러블슈팅
+
+| 증상 | 가능한 원인 | 해결 방법 |
+|------|-------------|-----------|
+| 로그인 후 채팅이 안 됨 | JWT·네트워크 | Output `[Clog Auth]` 확인, GitHub 계정 연결 후 Extension 재로드 |
+| Ctrl+S 후 `동기화 캐시 없음` | Initial Sync 미완료 | 사이드바 로그인 후 `[Initial Sync] 완료` 로그 확인 |
+| `워크스페이스 밖 파일` | 잘못된 폴더 열림 | 블로그로 쓸 **프로젝트 루트**를 VS Code에서 폴더로 연 상태에서 저장 |
+| AI 응답이 중간에 끊김 | SSE·서버 일시 오류 | 잠시 후 재시도; 지속 시 Output `[Clog SSE]` 확인 |
+| 발행 URL이 403 (Whitelabel) | API 도메인으로 블로그 URL 접근 | `clog.blogPublicBaseUrl`이 **S3 웹 블로그 origin**인지 확인 |
+| 미리보기는 되는데 발행이 안 됨 | Preview 연결·로그인 | Extension 재로드, 로그인 상태·`[Publish]` 로그 확인 |
+| 채팅 시 마지막 글자가 두 번 전송됨 | 한글 IME + Enter | 최신 Extension 버전 사용 (조합 중 Enter 전송 방지) |
+| 동기화 파일이 일부만 됨 | 크기·개수 제한 | 50KB 초과·바이너리 제외; 서버 파일 수 한도(기본 200) 초과 시 관리자에게 문의 |
+
+---
+
+## CLOG 플랫폼 구성
+
+본 저장소는 **VS Code Extension**입니다. CLOG 전체는 아래 컴포넌트로 구성됩니다.
+
+| 컴포넌트 | 역할 |
+|----------|------|
+| **VS Code Extension** (본 repo) | 로그인, 파일 동기화, AI 채팅, 미리보기, Extension 발행 API 호출 |
+| **Web Blog SPA** | 발행 글 목록·상세, 댓글·북마크 등 CMS |
+| **Spring Boot Backend** | 인증, 프로젝트/파일, 채팅 세션, SSE 프록시, 블로그 API |
+| **AWS Lambda AI Service** | ReAct, BM25 코드 검색, OpenAI 연동 |
+
+---
+
+## 기여자 · 개발
+
+Extension 소스를 직접 빌드·실행하려면:
 
 ```bash
 pnpm install
@@ -296,82 +192,15 @@ pnpm run webview:build
 pnpm run compile
 ```
 
-### Extension 실행
-
-1. 본 repo를 VS Code에서 연다
-2. **F5** → Extension Development Host
-3. **편집할 프로젝트 폴더**를 Host 창에서 연다 (동기화 대상)
-4. Activity Bar **Clog** → GitHub 로그인
-5. 채팅 전송 / Ctrl+S / 발행 테스트
-
-### Output 채널
-
-**View → Output → `Clog API Debug`**
-
-| 로그 접두사 | 의미 |
-|-------------|------|
-| `[Clog Auth]` | GitHub·JWT 상태 |
-| `[Initial Sync]` | `POST .../files` 일괄 업로드 |
-| `[Ctrl+S]` | diff PUT 또는 SKIP 사유 |
-| `[Clog SSE]` | generate 요청·이벤트 |
-| `[Publish]` | extension publish 결과 |
-
-### 커맨드
-
-| 커맨드 | 설명 |
-|--------|------|
-| `Clog: Open Sidebar` | 사이드바 포커스 |
-| `Send Code to Blog Creator` | 선택 코드를 채팅 첨부 대기 (`Ctrl/Cmd+Shift+B`) |
-| `Clog: Run API Integration Probe` | 공개 API·JWT·projects·SSE 스모크 |
+VS Code에서 **F5** → Extension Development Host → 대상 프로젝트 폴더를 연 뒤 Clog 사이드바에서 테스트합니다.
 
 ---
 
-## 배포 체크리스트
+## 알려진 한계
 
-### Extension
-
-- [ ] `pnpm run webview:build && pnpm run compile`
-- [ ] `vsce package` 또는 마켓 배포
-
-### clog-api (EC2 등)
-
-```bash
-APP_BLOG_PUBLIC_BASE_URL=http://clog-frontend-project.s3-website.ap-northeast-2.amazonaws.com
-```
-
-- [ ] `SecurityConfig`: SSE용 `DispatcherType.ASYNC` permitAll ([`SSE_ASYNC_SECURITY_FIX.md`](../backend-repo/docs/SSE_ASYNC_SECURITY_FIX.md))
-- [ ] `contentDiff` PUT 지원 배포 (`java-diff-utils`)
-- [ ] CORS에 S3 프론트 origin 포함
-
-### 프론트 (S3)
-
-- [ ] SPA hash 라우트 `/#/blog/:id` 동작
-- [ ] API 호출 origin/CORS와 Extension `clog.apiBaseUrl` 일치
-
----
-
-## 트러블슈팅
-
-| 증상 | 원인 | 조치 |
-|------|------|------|
-| Ctrl+S `동기화 캐시 없음` | 로그인·Initial Sync 미완료 | 사이드바 로그인, Debug에 `[Initial Sync] 완료` 확인 |
-| Ctrl+S `워크스페이스 밖 파일` | Host 워크스페이스와 파일 경로 불일치 | Host에서 대상 repo 루트로 폴더 열기 |
-| SSE 200 후 끊김 / 403 | ASYNC dispatch 인증 | 백엔드 SecurityConfig 배포 |
-| 발행 URL 403 (Whitelabel) | API 도메인으로 `#/blog` 접근 | S3 `blogPublicBaseUrl` 확인 |
-| `contentDiff` 400 | API 미배포 | 백엔드 재배포 |
-| 채팅 마지막 글자만 또 보내짐 | IME + Enter | webview 재빌드 반영 여부 확인 |
-| 블로그 만들기 무반응 | Preview `onPublish` 미연결 | Extension 재로드 |
-
----
-
-## 관련 문서
-
-| 문서 | 위치 |
-|------|------|
-| API 명세 | `../backend-repo/docs/API_SPEC.md` |
-| 클라이언트별 API | `../backend-repo/docs/API_SPEC_BY_CLIENT.md` |
-| 프로젝트 파일·컨텍스트 | `../backend-repo/docs/프로젝트_코드베이스_컨텍스트_설계.md` |
-| SSE Security | `../backend-repo/docs/SSE_ASYNC_SECURITY_FIX.md` |
+- JWT **Refresh Token**이 없어 만료 시 재로그인이 필요할 수 있습니다.
+- 동기화 대상은 텍스트 소스 위주이며, 대용량·바이너리 파일은 제외됩니다.
+- AI 검색은 현재 **BM25 중심**이며, 장기적으로 Hybrid Search 등 확장을 검토 중입니다.
 
 ---
 
