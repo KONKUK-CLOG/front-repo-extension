@@ -1,5 +1,5 @@
 import { createPatch } from "diff";
-import { ClogApiClient } from "../api/client";
+import { ApiError, ClogApiClient } from "../api/client";
 import {
   createProjectFile,
   listProjectFiles,
@@ -17,6 +17,7 @@ import {
 import {
   collectWorkspaceSourceFiles,
   getWorkspaceFolder,
+  isSyncableFileContent,
   toWorkspaceRelativePath,
 } from "./workspaceFiles";
 
@@ -24,6 +25,57 @@ export interface ProjectSyncResult {
   cache: ProjectSyncCache;
   created: number;
   skipped: number;
+  failed: string[];
+}
+
+function buildRemoteByPath(
+  remoteFiles: ProjectFileResponse[],
+): Map<string, ProjectFileResponse> {
+  return new Map(remoteFiles.map((file) => [file.filePath, file]));
+}
+
+async function refreshRemoteAfterConflict(
+  client: ClogApiClient,
+  projectId: string,
+): Promise<Map<string, ProjectFileResponse>> {
+  const remoteFiles = await listProjectFiles(client, projectId);
+  return buildRemoteByPath(remoteFiles);
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withSyncRetry<T>(
+  operation: () => Promise<T>,
+  log: (line: string) => void,
+  relativePath: string,
+): Promise<T> {
+  const maxAttempts = 3;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (
+        error instanceof ApiError &&
+        error.status === 429 &&
+        attempt < maxAttempts
+      ) {
+        const waitMs = 400 * attempt;
+        log(
+          `[Initial Sync] rate limit path=${relativePath}, retry in ${waitMs}ms (${attempt}/${maxAttempts})`,
+        );
+        await sleep(waitMs);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError;
 }
 
 export async function syncEntireWorkspaceToServer(
@@ -45,10 +97,8 @@ export async function syncEntireWorkspaceToServer(
       log(`[Initial Sync] skip collect (${reason}): ${relativePath}`);
     },
   });
-  const remoteFiles = await listProjectFiles(client, projectId);
-  const remoteByPath = new Map(
-    remoteFiles.map((file) => [file.filePath, file]),
-  );
+  let remoteFiles = await listProjectFiles(client, projectId);
+  let remoteByPath = buildRemoteByPath(remoteFiles);
 
   const nextCache: ProjectSyncCache = {
     projectId,
@@ -59,66 +109,123 @@ export async function syncEntireWorkspaceToServer(
 
   let created = 0;
   let skipped = 0;
+  const failed: string[] = [];
 
   log(
     `[Initial Sync] workspace files=${localFiles.length} skippedCollect=${skippedCollect} remote=${remoteFiles.length}`,
   );
 
   for (const local of localFiles) {
-    const remote = remoteByPath.get(local.relativePath);
-    const cached = getCachedFileEntry(nextCache, local.relativePath);
-
-    if (!remote) {
-      log(`[Initial Sync] >>> POST .../files path=${local.relativePath}`);
-      const saved = await createProjectFile(
-        client,
-        projectId,
-        local.relativePath,
-        local.language,
-        local.content,
+    if (!isSyncableFileContent(local.content)) {
+      log(
+        `[Initial Sync] skip sync (empty-content): ${local.relativePath}`,
       );
-      upsertCachedFileEntry(nextCache, {
-        fileId: saved.id,
-        relativePath: local.relativePath,
-        language: local.language,
-        baselineContent: local.content,
-      });
-      created += 1;
-      log(`[Initial Sync] <<< POST OK fileId=${saved.id}`);
+      skipped += 1;
       continue;
     }
 
-    if (cached?.baselineContent === local.content) {
+    let remote = remoteByPath.get(local.relativePath);
+    const cached = getCachedFileEntry(nextCache, local.relativePath);
+
+    try {
+      if (!remote) {
+        log(`[Initial Sync] >>> POST .../files path=${local.relativePath}`);
+        try {
+          const saved = await withSyncRetry(
+            () =>
+              createProjectFile(
+                client,
+                projectId,
+                local.relativePath,
+                local.language,
+                local.content,
+              ),
+            log,
+            local.relativePath,
+          );
+          upsertCachedFileEntry(nextCache, {
+            fileId: saved.id,
+            relativePath: local.relativePath,
+            language: local.language,
+            baselineContent: local.content,
+          });
+          created += 1;
+          log(`[Initial Sync] <<< POST OK fileId=${saved.id}`);
+          continue;
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 409) {
+            remoteByPath = await refreshRemoteAfterConflict(client, projectId);
+            remote = remoteByPath.get(local.relativePath);
+            if (remote) {
+              log(
+                `[Initial Sync] already on server (409) path=${local.relativePath} fileId=${remote.id}`,
+              );
+              upsertCachedFileEntry(nextCache, {
+                fileId: remote.id,
+                relativePath: local.relativePath,
+                language: local.language,
+                baselineContent: local.content,
+              });
+              skipped += 1;
+              continue;
+            }
+          }
+          throw error;
+        }
+        continue;
+      }
+
+      const remoteFile =
+        remote ?? remoteByPath.get(local.relativePath);
+      if (!remoteFile) {
+        failed.push(local.relativePath);
+        continue;
+      }
+
+      if (cached?.baselineContent === local.content) {
+        upsertCachedFileEntry(nextCache, {
+          fileId: remoteFile.id,
+          relativePath: local.relativePath,
+          language: local.language,
+          baselineContent: local.content,
+        });
+        skipped += 1;
+        continue;
+      }
+
+      if (!cached) {
+        log(
+          `[Initial Sync] >>> PUT full align (cache miss) path=${local.relativePath}`,
+        );
+        await withSyncRetry(
+          () =>
+            updateProjectFile(client, projectId, remoteFile.id, {
+              content: local.content,
+              language: local.language,
+            }),
+          log,
+          local.relativePath,
+        );
+      }
+
       upsertCachedFileEntry(nextCache, {
-        fileId: remote.id,
+        fileId: remoteFile.id,
         relativePath: local.relativePath,
         language: local.language,
         baselineContent: local.content,
       });
       skipped += 1;
-      continue;
+    } catch (error) {
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : "파일 동기화에 실패했습니다.";
+      failed.push(local.relativePath);
+      log(`[Initial Sync] error path=${local.relativePath}: ${message}`);
     }
-
-    if (!cached) {
-      log(
-        `[Initial Sync] >>> PUT full align (cache miss) path=${local.relativePath}`,
-      );
-      await updateProjectFile(client, projectId, remote.id, {
-        content: local.content,
-        language: local.language,
-      });
-    }
-
-    upsertCachedFileEntry(nextCache, {
-      fileId: remote.id,
-      relativePath: local.relativePath,
-      language: local.language,
-      baselineContent: local.content,
-    });
-    skipped += 1;
   }
 
-  return { cache: nextCache, created, skipped };
+  return { cache: nextCache, created, skipped, failed };
 }
 
 export interface FileDiffSyncResult {
@@ -210,6 +317,13 @@ export async function ensureWorkspaceFileInCache(
       baselineContent: content,
     });
     log(`[Ctrl+S] cache 등록 (서버 기존 파일) path=${relativePath}`);
+    return cache;
+  }
+
+  if (!isSyncableFileContent(content)) {
+    log(
+      `[Ctrl+S] SKIP — 빈 파일은 서버에 등록할 수 없음: ${relativePath}`,
+    );
     return cache;
   }
 

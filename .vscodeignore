@@ -1,11 +1,34 @@
 .vscode/**
 .vscode-test/**
 src/**
+.git/**
+.github/**
 .gitignore
 .yarnrc
+.npmrc
 vsc-extension-quickstart.md
 **/tsconfig.json
-**/eslint.config.mjs
+**/eslint.config.*
 **/*.map
 **/*.ts
 **/.vscode-test.*
+
+# Dependencies (pnpm symlinks break vsce zip)
+node_modules/**
+webview-ui/node_modules/**
+
+# Webview: ship built assets only
+webview-ui/src/**
+webview-ui/public/**
+webview-ui/index.html
+webview-ui/vite.config.*
+webview-ui/eslint.config.*
+webview-ui/tsconfig*.json
+webview-ui/README.md
+webview-ui/.gitignore
+webview-ui/pnpm-lock.yaml
+
+# Root dev artifacts
+pnpm-lock.yaml
+**/.eslintrc*
+**/mocha.opts

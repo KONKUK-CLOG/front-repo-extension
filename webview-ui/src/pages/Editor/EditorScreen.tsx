@@ -1,5 +1,5 @@
 import styled from '@emotion/styled';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { markdownToHtml } from '../../utils/markdown';
 
 // VS Code API 타입 선언
@@ -322,6 +322,29 @@ interface Attachment {
   lineEnd?: number;
 }
 
+function upsertAssistantMessage(
+  prev: Message[],
+  draftId: string,
+  content: string,
+): Message[] {
+  const exists = prev.some(msg => msg.id === draftId);
+  if (!exists) {
+    return [
+      ...prev,
+      {
+        id: draftId,
+        role: 'assistant' as const,
+        content,
+        timestamp: new Date(),
+      },
+    ];
+  }
+
+  return prev.map(msg =>
+    msg.id === draftId ? { ...msg, content } : msg,
+  );
+}
+
 export default function EditorScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -334,6 +357,13 @@ export default function EditorScreen() {
   const assistantDraftIdRef = useRef<string | null>(null);
   const isComposingRef = useRef(false);
   const sendLockRef = useRef(false);
+
+  const syncAssistantMessage = useCallback((draftId: string, content: string) => {
+    if (!content) {
+      return;
+    }
+    setMessages(prev => upsertAssistantMessage(prev, draftId, content));
+  }, []);
 
   const openPreview = () => {
     if (!previewMarkdown.trim()) {
@@ -382,6 +412,7 @@ export default function EditorScreen() {
         if (!matchesDraft(message)) {
           return;
         }
+        setPreviewMarkdown('');
         setIsThinking(true);
         setIsStreaming(true);
         setThinkingText('');
@@ -402,7 +433,7 @@ export default function EditorScreen() {
         if (!matchesDraft(message)) {
           return;
         }
-        if (typeof message.aggregate !== 'string') {
+        if (typeof message.aggregate !== 'string' || !message.aggregate) {
           return;
         }
 
@@ -411,29 +442,8 @@ export default function EditorScreen() {
           return;
         }
 
-        setMessages(prev => {
-          const exists = prev.some(msg => msg.id === draftId);
-          if (!exists) {
-            return [
-              ...prev,
-              {
-                id: draftId,
-                role: 'assistant' as const,
-                content: message.aggregate,
-                timestamp: new Date(),
-              },
-            ];
-          }
-
-          return prev.map(msg =>
-            msg.id === draftId
-              ? {
-                  ...msg,
-                  content: message.aggregate,
-                }
-              : msg,
-          );
-        });
+        setIsThinking(false);
+        syncAssistantMessage(draftId, message.aggregate);
         return;
       }
 
@@ -451,14 +461,26 @@ export default function EditorScreen() {
         if (!matchesDraft(message)) {
           return;
         }
+        const draftId = assistantDraftIdRef.current;
+        const finalResponse =
+          typeof message.response === 'string' ? message.response : '';
+        const finalPreview =
+          typeof message.previewMarkdown === 'string'
+            ? message.previewMarkdown
+            : '';
+
+        if (draftId && finalResponse.trim()) {
+          syncAssistantMessage(draftId, finalResponse);
+        }
+        if (finalPreview.trim()) {
+          setPreviewMarkdown(finalPreview);
+        }
+
         setIsThinking(false);
         setIsStreaming(false);
         setThinkingText('');
         assistantDraftIdRef.current = null;
         sendLockRef.current = false;
-        if (typeof message.previewMarkdown === 'string' && message.previewMarkdown.trim()) {
-          setPreviewMarkdown(message.previewMarkdown);
-        }
         return;
       }
 
@@ -505,7 +527,7 @@ export default function EditorScreen() {
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, []);
+  }, [syncAssistantMessage]);
 
   const handleSend = () => {
     if (sendLockRef.current || isStreaming) {
@@ -538,6 +560,7 @@ export default function EditorScreen() {
     const draftId = `assistant-${Date.now()}`;
 
     sendLockRef.current = true;
+    setPreviewMarkdown('');
     setMessages(prev => [...prev, userMessage]);
     assistantDraftIdRef.current = draftId;
     setInput('');

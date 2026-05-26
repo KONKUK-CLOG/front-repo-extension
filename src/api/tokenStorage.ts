@@ -26,8 +26,12 @@ export class TokenStorage {
     return this.globalState.get<string>(PROJECT_ID_KEY);
   }
 
-  setProjectId(projectId: string): Thenable<void> {
-    return this.globalState.update(PROJECT_ID_KEY, projectId);
+  async setProjectId(projectId: string): Promise<void> {
+    const previous = this.getProjectId();
+    await this.globalState.update(PROJECT_ID_KEY, projectId);
+    if (previous && previous !== projectId) {
+      await this.globalState.update(CHAT_SESSION_ID_KEY, undefined);
+    }
   }
 
   getChatSessionId(): string | undefined {
@@ -36,6 +40,10 @@ export class TokenStorage {
 
   setChatSessionId(sessionId: string): Thenable<void> {
     return this.globalState.update(CHAT_SESSION_ID_KEY, sessionId);
+  }
+
+  clearChatSessionId(): Thenable<void> {
+    return this.globalState.update(CHAT_SESSION_ID_KEY, undefined);
   }
 
   clearSessionState(): Thenable<void> {

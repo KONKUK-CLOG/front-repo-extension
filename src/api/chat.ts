@@ -11,6 +11,10 @@ export async function getChatHistory(
   return client.request<ChatHistoryResponse>(`/api/chat/history${query}`);
 }
 
+export function isChatSessionNotFoundMessage(message: string): boolean {
+  return /채팅 세션을 찾을 수 없|CHAT_SESSION_NOT_FOUND/i.test(message);
+}
+
 export function buildChatSendBody(
   request: ChatSendRequest,
 ): ChatSendRequest {

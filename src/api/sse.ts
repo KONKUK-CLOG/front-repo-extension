@@ -14,41 +14,61 @@ export async function consumeSseResponse(
   streamState: SseStreamState,
   handlers: SseEventHandlers,
   abortSignal: AbortSignal,
-): Promise<void> {
+): Promise<{ serverError?: string }> {
   const reader = stream.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
+  let serverError: string | undefined;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) {
-      break;
-    }
+  const wrappedHandlers: SseEventHandlers = {
+    ...handlers,
+    onError: (message) => {
+      serverError = message;
+      handlers.onError?.(message);
+    },
+  };
 
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-
-    for (const part of parts) {
-      if (!part.trim()) {
-        continue;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
       }
 
-      const packet = parseSseEvent(part);
-      if (!packet) {
-        continue;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+
+      for (const part of parts) {
+        if (!part.trim()) {
+          continue;
+        }
+
+        const packet = parseSseEvent(part);
+        if (!packet) {
+          continue;
+        }
+
+        handleSsePacket(packet, streamState, wrappedHandlers);
       }
-
-      handleSsePacket(packet, streamState, handlers);
     }
+
+    if (!abortSignal.aborted && buffer.trim()) {
+      const packet = parseSseEvent(buffer);
+      if (packet) {
+        handleSsePacket(packet, streamState, wrappedHandlers);
+      }
+    }
+  } catch (readError) {
+    // Spring completeWithError() often aborts the body after event:error.
+    if (!serverError) {
+      throw readError;
+    }
+  } finally {
+    reader.releaseLock();
   }
 
-  if (!abortSignal.aborted && buffer.trim()) {
-    const packet = parseSseEvent(buffer);
-    if (packet) {
-      handleSsePacket(packet, streamState, handlers);
-    }
-  }
+  return { serverError };
 }
 
 function parseSseEvent(
@@ -128,35 +148,35 @@ function handleSsePacket(
   }
 
   if (eventName === "answer") {
-    const delta = extractString(normalized, [
+    const incoming = extractString(normalized, [
       "text",
       "content",
       "delta",
       "answer",
     ]);
-    if (!delta) {
-      return;
-    }
-
-    streamState.assistant += delta;
-    handlers.onAssistantDelta?.(delta, streamState.assistant);
+    applyStreamText(
+      incoming,
+      streamState,
+      "assistant",
+      (delta, aggregate) => handlers.onAssistantDelta?.(delta, aggregate),
+    );
     return;
   }
 
   if (eventName === "blog") {
-    const delta = extractString(normalized, [
+    const incoming = extractString(normalized, [
       "markdown",
       "blog_markdown",
       "content",
       "text",
       "delta",
     ]);
-    if (!delta) {
-      return;
-    }
-
-    streamState.previewMarkdown += delta;
-    handlers.onPreviewDelta?.(delta, streamState.previewMarkdown);
+    applyStreamText(
+      incoming,
+      streamState,
+      "previewMarkdown",
+      (delta, aggregate) => handlers.onPreviewDelta?.(delta, aggregate),
+    );
     return;
   }
 
@@ -182,15 +202,67 @@ function handleSsePacket(
 
     const assistant = finalAnswer || artifactAnswer;
     if (assistant) {
-      streamState.assistant = assistant;
-      handlers.onAssistantDelta?.("", assistant);
+      applyStreamText(
+        assistant,
+        streamState,
+        "assistant",
+        (delta, aggregate) => handlers.onAssistantDelta?.(delta, aggregate),
+      );
     }
 
     if (artifactMarkdown) {
-      streamState.previewMarkdown = artifactMarkdown;
-      handlers.onPreviewDelta?.("", artifactMarkdown);
+      applyStreamText(
+        artifactMarkdown,
+        streamState,
+        "previewMarkdown",
+        (delta, aggregate) => handlers.onPreviewDelta?.(delta, aggregate),
+      );
     }
   }
+}
+
+/** Spec A: text는 델타 청크이거나 누적 전체 문자열일 수 있음 */
+export function appendStreamText(
+  current: string,
+  incoming: string,
+): { next: string; delta: string } {
+  if (!incoming) {
+    return { next: current, delta: "" };
+  }
+  if (!current) {
+    return { next: incoming, delta: incoming };
+  }
+  if (incoming === current) {
+    return { next: current, delta: "" };
+  }
+  if (incoming.startsWith(current)) {
+    const delta = incoming.slice(current.length);
+    return { next: incoming, delta };
+  }
+  if (current.startsWith(incoming)) {
+    return { next: current, delta: "" };
+  }
+  return { next: current + incoming, delta: incoming };
+}
+
+function applyStreamText(
+  incoming: string,
+  streamState: SseStreamState,
+  field: "assistant" | "previewMarkdown",
+  emit: (delta: string, aggregate: string) => void,
+): void {
+  if (!incoming) {
+    return;
+  }
+
+  const current = streamState[field];
+  const { next, delta } = appendStreamText(current, incoming);
+  if (!delta && next === current) {
+    return;
+  }
+
+  streamState[field] = next;
+  emit(delta, next);
 }
 
 function formatStatusEvent(

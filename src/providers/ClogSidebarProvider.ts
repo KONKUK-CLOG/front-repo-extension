@@ -22,7 +22,7 @@ import {
 } from "../sync/projectSync";
 import { getWorkspaceFolder } from "../sync/workspaceFiles";
 import { getUserIdFromToken } from "../api/jwt";
-import { buildChatSendBody } from "../api/chat";
+import { buildChatSendBody, isChatSessionNotFoundMessage } from "../api/chat";
 import { runApiIntegrationProbe } from "../api/apiProbe";
 import { consumeSseResponse, mapAttachmentsToCodeSnippets } from "../api/sse";
 import { TokenStorage } from "../api/tokenStorage";
@@ -48,6 +48,7 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _tokenStorage: TokenStorage;
   private readonly _apiClient: ClogApiClient;
   private _loginPromise?: Promise<boolean>;
+  private _syncWorkspacePromise?: Promise<void>;
   private static readonly _githubScopes = ["read:user", "user:email"];
 
   constructor(
@@ -331,6 +332,20 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private async _syncEntireWorkspace(): Promise<void> {
+    if (this._syncWorkspacePromise) {
+      this._debugLog("[Initial Sync] 이미 진행 중 — 기존 작업 대기");
+      return this._syncWorkspacePromise;
+    }
+
+    this._syncWorkspacePromise = this._runInitialSync();
+    try {
+      await this._syncWorkspacePromise;
+    } finally {
+      this._syncWorkspacePromise = undefined;
+    }
+  }
+
+  private async _runInitialSync(): Promise<void> {
     const projectId = this._tokenStorage.getProjectId();
     if (!projectId) {
       this._debugLog("[Initial Sync] SKIP — projectId 없음");
@@ -345,19 +360,29 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
 
     try {
       const existing = this._projectSyncCache ?? loadProjectSyncCache(this._projectSyncCacheUri);
-      const { cache, created, skipped } = await syncEntireWorkspaceToServer(
-        this._apiClient,
-        projectId,
-        existing,
-        (line) => this._debugLog(line),
-      );
+      const { cache, created, skipped, failed } =
+        await syncEntireWorkspaceToServer(
+          this._apiClient,
+          projectId,
+          existing,
+          (line) => this._debugLog(line),
+        );
 
       saveProjectSyncCache(this._projectSyncCacheUri, cache);
       this._projectSyncCache = cache;
 
       this._debugLog(
-        `[Initial Sync] 완료 POST=${created} cached=${Object.keys(cache.files).length} skipped=${skipped}`,
+        `[Initial Sync] 완료 POST=${created} cached=${Object.keys(cache.files).length} skipped=${skipped} failed=${failed.length}`,
       );
+
+      if (failed.length > 0) {
+        this._debugLog(
+          `[Initial Sync] 실패 파일: ${failed.slice(0, 10).join(", ")}${failed.length > 10 ? " …" : ""}`,
+        );
+        void vscode.window.showWarningMessage(
+          `Clog: ${failed.length}개 파일 동기화에 실패했습니다. Output(Clog API Debug)를 확인해주세요.`,
+        );
+      }
 
       this._postMessage({
         type: "snapshotReady",
@@ -642,146 +667,190 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
       chatSessionId: this._tokenStorage.getChatSessionId(),
     };
 
+    let streamError: string | undefined;
+    let omitChatSessionId = false;
+    let retriedStaleSession = false;
+
+    const codeSnippets = mapAttachmentsToCodeSnippets(
+      Array.isArray(message.attachments) ? message.attachments : [],
+    );
+
     try {
-      let streamError: string | undefined;
+    streamLoop: while (true) {
+      streamError = undefined;
+      streamState.thinking = "";
+      streamState.assistant = "";
+      streamState.previewMarkdown = "";
 
       const sseBody = buildChatSendBody({
         message: prompt,
         projectId: this._tokenStorage.getProjectId(),
-        chatSessionId: this._tokenStorage.getChatSessionId(),
-        codeSnippets: mapAttachmentsToCodeSnippets(
-          Array.isArray(message.attachments) ? message.attachments : [],
-        ),
+        chatSessionId: omitChatSessionId
+          ? undefined
+          : this._tokenStorage.getChatSessionId(),
+        codeSnippets,
       });
 
       this._debugLog(`[Clog SSE] POST ${getApiBaseUrl()}/api/blogs/generate`);
-      this._debugLog(`[Clog SSE] Authorization: Bearer ${accessToken}`);
       this._debugLog(`[Clog SSE] body: ${JSON.stringify(sseBody)}`);
 
-      const response = await streamBlogGenerate(
-        this._apiClient,
-        sseBody,
-        controller.signal,
-      );
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        const apiError = new ApiError(
-          formatHttpErrorMessage(response.status, errorText),
-          response.status,
+      try {
+        const response = await streamBlogGenerate(
+          this._apiClient,
+          sseBody,
+          controller.signal,
         );
-        if (response.status === 401 || response.status === 403) {
-          await this._invalidateAuthState(apiError.message);
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          const apiError = new ApiError(
+            formatHttpErrorMessage(response.status, errorText),
+            response.status,
+          );
+          if (response.status === 401 || response.status === 403) {
+            await this._invalidateAuthState(apiError.message);
+          }
+          throw apiError;
         }
-        throw apiError;
-      }
 
-      if (!response.body) {
-        throw new Error("SSE 응답 body가 비어 있습니다.");
-      }
+        if (!response.body) {
+          throw new Error("SSE 응답 body가 비어 있습니다.");
+        }
 
-      await consumeSseResponse(
-        response.body,
-        streamState,
-        {
-          onEvent: (eventName, data) => {
-            const dataText =
-              typeof data === "string" ? data : JSON.stringify(data);
-            this._debugLog(`[Clog SSE] event: ${eventName} data: ${dataText}`);
+        const { serverError } = await consumeSseResponse(
+          response.body,
+          streamState,
+          {
+            onEvent: (eventName, data) => {
+              const dataText =
+                typeof data === "string" ? data : JSON.stringify(data);
+              this._debugLog(`[Clog SSE] event: ${eventName} data: ${dataText}`);
+            },
+            onThinkingDelta: (delta, aggregate) => {
+              this._postStreamMessage(draftId, {
+                type: "llmThinkingChunk",
+                delta,
+                aggregate,
+              });
+            },
+            onAssistantDelta: (delta, aggregate) => {
+              this._postStreamMessage(draftId, {
+                type: "llmAssistantChunk",
+                delta,
+                aggregate,
+              });
+            },
+            onPreviewDelta: (delta, aggregate) => {
+              this._latestPreviewMarkdown = aggregate;
+              this._postStreamMessage(draftId, {
+                type: "llmPreviewChunk",
+                delta,
+                aggregate,
+              });
+              updatePreviewPanelContent(
+                this._extensionUri,
+                aggregate,
+                this._bindPreviewPublish(aggregate),
+              );
+            },
+            onSessionId: (sessionId) => {
+              void this._tokenStorage.setChatSessionId(sessionId);
+            },
           },
-          onThinkingDelta: (delta, aggregate) => {
-            this._postStreamMessage(draftId, {
-              type: "llmThinkingChunk",
-              delta,
-              aggregate,
-            });
-          },
-          onAssistantDelta: (delta, aggregate) => {
-            this._postStreamMessage(draftId, {
-              type: "llmAssistantChunk",
-              delta,
-              aggregate,
-            });
-          },
-          onPreviewDelta: (delta, aggregate) => {
-            this._latestPreviewMarkdown = aggregate;
-            this._postStreamMessage(draftId, {
-              type: "llmPreviewChunk",
-              delta,
-              aggregate,
-            });
-            updatePreviewPanelContent(
-              this._extensionUri,
-              aggregate,
-              this._bindPreviewPublish(aggregate),
-            );
-          },
-          onSessionId: (sessionId) => {
-            void this._tokenStorage.setChatSessionId(sessionId);
-          },
-          onError: (errorMessage) => {
-            streamError = errorMessage;
-          },
-        },
-        controller.signal,
-      );
-
-      if (streamError) {
-        throw new Error(streamError);
-      }
-
-      if (streamState.previewMarkdown.trim()) {
-        this._latestPreviewMarkdown = streamState.previewMarkdown;
-      }
-
-      this._debugLog(
-        `[SSE] stream done assistantLen=${streamState.assistant.length} previewLen=${streamState.previewMarkdown.length} sessionId=${streamState.chatSessionId ?? "(none)"}`,
-      );
-      if (streamState.previewMarkdown.trim()) {
-        updatePreviewPanelContent(
-          this._extensionUri,
-          streamState.previewMarkdown,
-          this._bindPreviewPublish(streamState.previewMarkdown),
+          controller.signal,
         );
-      }
+        streamError = serverError;
 
-      this._postStreamMessage(draftId, {
-        type: "llmStreamDone",
-        thinking: streamState.thinking,
-        response: streamState.assistant,
-        previewMarkdown: streamState.previewMarkdown,
-        previewReady: Boolean(streamState.previewMarkdown.trim()),
-      });
-    } catch (error) {
-      if (controller.signal.aborted) {
+        if (
+          streamError &&
+          isChatSessionNotFoundMessage(streamError) &&
+          !retriedStaleSession
+        ) {
+          retriedStaleSession = true;
+          omitChatSessionId = true;
+          await this._tokenStorage.clearChatSessionId();
+          this._debugLog(
+            "[Clog SSE] stale chatSessionId — cleared, retrying without session id",
+          );
+          continue streamLoop;
+        }
+
+        if (streamError) {
+          throw new Error(streamError);
+        }
+
+        break streamLoop;
+      } catch (error) {
+        if (controller.signal.aborted) {
+          this._postStreamMessage(draftId, {
+            type: "llmStreamError",
+            message: "",
+            isCanceled: true,
+          });
+          return;
+        }
+
+        if (
+          streamError &&
+          isChatSessionNotFoundMessage(streamError) &&
+          !retriedStaleSession
+        ) {
+          retriedStaleSession = true;
+          omitChatSessionId = true;
+          await this._tokenStorage.clearChatSessionId();
+          this._debugLog(
+            "[Clog SSE] stale chatSessionId — cleared, retrying without session id",
+          );
+          continue streamLoop;
+        }
+
+        let messageText =
+          streamError ??
+          (error instanceof ApiError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : "알 수 없는 스트림 오류");
+
+        if (!streamError && /terminated/i.test(messageText)) {
+          messageText =
+            "서버 연결이 끊겼습니다. JWT 만료·인증 실패 또는 서버 SSE 오류일 수 있습니다. 다시 로그인 후 시도해주세요.";
+        }
+
+        this._debugLog(`[SSE] stream error: ${messageText}`);
+        if (error instanceof ApiError && error.responseBody) {
+          this._debugLog(`[SSE] error body: ${error.responseBody}`);
+        }
         this._postStreamMessage(draftId, {
           type: "llmStreamError",
-          message: "",
-          isCanceled: true,
+          message: messageText,
         });
         return;
       }
+    }
 
-      let messageText =
-        error instanceof ApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : "알 수 없는 스트림 오류";
+    if (streamState.previewMarkdown.trim()) {
+      this._latestPreviewMarkdown = streamState.previewMarkdown;
+    }
 
-      if (/terminated/i.test(messageText)) {
-        messageText =
-          "서버 연결이 끊겼습니다. JWT 만료·인증 실패 또는 서버 SSE 오류일 수 있습니다. 다시 로그인 후 시도해주세요.";
-      }
+    this._debugLog(
+      `[SSE] stream done assistantLen=${streamState.assistant.length} previewLen=${streamState.previewMarkdown.length} sessionId=${streamState.chatSessionId ?? "(none)"}`,
+    );
+    if (streamState.previewMarkdown.trim()) {
+      updatePreviewPanelContent(
+        this._extensionUri,
+        streamState.previewMarkdown,
+        this._bindPreviewPublish(streamState.previewMarkdown),
+      );
+    }
 
-      this._debugLog(`[SSE] stream error: ${messageText}`);
-      if (error instanceof ApiError && error.responseBody) {
-        this._debugLog(`[SSE] error body: ${error.responseBody}`);
-      }
-      this._postStreamMessage(draftId, {
-        type: "llmStreamError",
-        message: messageText,
-      });
+    this._postStreamMessage(draftId, {
+      type: "llmStreamDone",
+      thinking: streamState.thinking,
+      response: streamState.assistant,
+      previewMarkdown: streamState.previewMarkdown,
+      previewReady: Boolean(streamState.previewMarkdown.trim()),
+    });
     } finally {
       if (this._activeRequestController === controller) {
         this._activeRequestController = undefined;

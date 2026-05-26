@@ -9,10 +9,17 @@ function escapeHtml(value: string): string {
 
 function renderInline(markdown: string): string {
   const codeTokens: string[] = [];
+  // Inline code is parked behind a placeholder while the other inline
+  // rules run, then restored at the end. The placeholder must contain NO
+  // markdown-special chars: the old `@@CODE_n@@` token had an underscore,
+  // so the _italic_ pass below paired the underscores across tokens and
+  // mangled them, the restore then failed to find them, and literal
+  // "@@CODEn@@" text leaked into the rendered post instead of the code.
+  const codeToken = (i: number) => `@@CODE${i}@@`;
 
   let html = escapeHtml(markdown)
     .replace(/`([^`]+)`/g, (_match, code: string) => {
-      const token = `@@CODE_${codeTokens.length}@@`;
+      const token = codeToken(codeTokens.length);
       codeTokens.push(`<code>${code}</code>`);
       return token;
     })
@@ -28,8 +35,10 @@ function renderInline(markdown: string): string {
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
     .replace(/_(.+?)_/g, "<em>$1</em>");
 
+  // split/join restores EVERY occurrence and treats the replacement as a
+  // literal (String.replace would special-case `$` sequences in code).
   codeTokens.forEach((tokenHtml, index) => {
-    html = html.replace(`@@CODE_${index}@@`, tokenHtml);
+    html = html.split(codeToken(index)).join(tokenHtml);
   });
 
   return html;

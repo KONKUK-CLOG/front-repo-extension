@@ -89,7 +89,8 @@
     "watch": "tsc -watch -p ./",
     "pretest": "pnpm run compile && pnpm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "package": "pnpm run webview:build && vsce package --no-dependencies --no-rewrite-relative-links --allow-missing-repository"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -99,6 +100,7 @@
     "@typescript-eslint/parser": "^8.45.0",
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.9.1",
     "eslint": "^9.36.0",
     "typescript": "^5.9.3"
   },

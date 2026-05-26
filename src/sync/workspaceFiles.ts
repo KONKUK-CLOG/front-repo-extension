@@ -58,6 +58,11 @@ export interface CollectWorkspaceFilesOptions {
   onSkip?: (reason: string, relativePath: string) => void;
 }
 
+/** 서버 `@NotBlank` — 빈 문자열·공백만 있는 content는 업로드 불가 */
+export function isSyncableFileContent(content: string): boolean {
+  return content.trim().length > 0;
+}
+
 const EXTENSION_LANGUAGE: Record<string, string> = {
   ".ts": "typescript",
   ".tsx": "typescript",
@@ -200,12 +205,7 @@ export async function collectWorkspaceSourceFiles(
     }
 
     if (content.byteLength === 0) {
-      files.push({
-        relativePath,
-        absolutePath,
-        language: resolveLanguage(relativePath),
-        content: "",
-      });
+      onSkip?.("empty-file", relativePath);
       continue;
     }
 
