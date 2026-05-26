@@ -57,6 +57,12 @@ function registerCommands(
       provider.sendSelectedCode();
     }),
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("clog.runApiProbe", () => {
+      void provider.runApiProbe();
+    }),
+  );
 }
 
 /**

@@ -500,6 +500,19 @@ export function getPreviewHtml(
         });
       });
 
+      window.addEventListener('message', (event) => {
+        const message = event.data;
+        if (message?.type !== 'previewMarkdown') {
+          return;
+        }
+
+        if (typeof message.html === 'string') {
+          editor.commands.setContent(message.html, false);
+          updateToolbarState();
+          setSaveStatus('SSE 미리보기 업데이트');
+        }
+      });
+
       setInterval(() => {
         const state = vscode.getState() || {};
         state.content = editor.getHTML();

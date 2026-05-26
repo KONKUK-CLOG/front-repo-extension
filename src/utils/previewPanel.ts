@@ -1,36 +1,90 @@
 import * as vscode from "vscode";
 import { getPreviewHtml } from "./previewHtml";
+import { markdownToHtml } from "./markdownToHtml";
+
+let activePreviewPanel: vscode.WebviewPanel | undefined;
+let activeOnPublish: ((htmlContent: string) => void | Promise<void>) | undefined;
+
+export function setPreviewPublishHandler(
+  handler: (htmlContent: string) => void | Promise<void>,
+): void {
+  activeOnPublish = handler;
+}
 
 /**
  * 미리보기 패널 열기
  * LLM이 생성한 블로그 포스트를 미리보기하고 발행할 수 있는 패널
  */
-export function openPreviewPanel(extensionUri: vscode.Uri, markdown?: string) {
+export function openPreviewPanel(
+  extensionUri: vscode.Uri,
+  markdown?: string,
+  onPublish?: (htmlContent: string) => void | Promise<void>,
+) {
+  if (onPublish) {
+    activeOnPublish = onPublish;
+  }
+
+  if (activePreviewPanel) {
+    activePreviewPanel.reveal(vscode.ViewColumn.Beside);
+
+    if (typeof markdown === "string") {
+      activePreviewPanel.webview.postMessage({
+        type: "previewMarkdown",
+        html: markdownToHtml(markdown),
+      });
+    }
+
+    return activePreviewPanel;
+  }
+
   const panel = vscode.window.createWebviewPanel(
     "clogPreview",
     "Blog Preview",
-    vscode.ViewColumn.One,
+    vscode.ViewColumn.Beside,
     {
       enableScripts: true,
+      retainContextWhenHidden: true,
     },
   );
 
+  activePreviewPanel = panel;
   panel.webview.html = getPreviewHtml(markdown);
 
-  // 미리보기에서 메시지 받기
-  panel.webview.onDidReceiveMessage((message) => {
-    if (message.type === "createBlog") {
-      // 편집된 내용 포함
-      const editedContent = message.content || "";
-
-      vscode.window.showInformationMessage(
-        "블로그 포스트가 GitHub에 발행되었습니다! (추후 구현)",
-      );
-
-      // 편집된 내용을 로그로 출력 (디버깅용)
-      console.log("Edited blog content:", editedContent);
-
-      panel.dispose();
+  panel.webview.onDidReceiveMessage(async (message) => {
+    if (message.type !== "createBlog") {
+      return;
     }
+
+    if (!activeOnPublish) {
+      void vscode.window.showErrorMessage(
+        "블로그 발행 핸들러가 연결되지 않았습니다. Extension을 다시 로드해주세요.",
+      );
+      return;
+    }
+
+    const htmlContent =
+      typeof message.content === "string" ? message.content : "";
+    await activeOnPublish(htmlContent);
+    panel.dispose();
+  });
+
+  panel.onDidDispose(() => {
+    if (activePreviewPanel === panel) {
+      activePreviewPanel = undefined;
+    }
+  });
+
+  return panel;
+}
+
+export function updatePreviewPanelContent(
+  extensionUri: vscode.Uri,
+  markdown: string,
+  onPublish?: (htmlContent: string) => void | Promise<void>,
+) {
+  const panel = openPreviewPanel(extensionUri, markdown, onPublish);
+  panel.webview.postMessage({
+    type: "previewMarkdown",
+    html: markdownToHtml(markdown),
   });
 }

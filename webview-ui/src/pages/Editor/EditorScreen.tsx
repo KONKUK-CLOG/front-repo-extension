@@ -1,5 +1,6 @@
 import styled from '@emotion/styled';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { markdownToHtml } from '../../utils/markdown';
 
 // VS Code API 타입 선언
 declare global {
@@ -64,7 +65,50 @@ const MessageHeader = styled.div`
 const MessageContent = styled.div`
   color: #d4d4d4;
   line-height: 1.6;
-  white-space: pre-wrap;
+
+  p,
+  ul,
+  ol,
+  blockquote,
+  pre {
+    margin: 0.4rem 0;
+  }
+
+  strong {
+    font-weight: 700;
+    color: #ffffff;
+  }
+
+  em {
+    font-style: italic;
+  }
+
+  code {
+    background: #0f111a;
+    border: 1px solid #2d333b;
+    border-radius: 4px;
+    padding: 0.1rem 0.35rem;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.82rem;
+  }
+
+  pre {
+    background: #0f111a;
+    border: 1px solid #2d333b;
+    border-radius: 8px;
+    padding: 0.7rem;
+    overflow: auto;
+  }
+
+  pre code {
+    border: none;
+    padding: 0;
+    background: transparent;
+  }
+
+  a {
+    color: #54aeff;
+  }
 `;
 
 const ThinkingIndicator = styled.div`
@@ -210,6 +254,35 @@ const SendButton = styled(IconButton)`
   }
 `;
 
+const PreviewBar = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid #2da44e;
+  background: rgba(45, 164, 78, 0.12);
+  color: #d4d4d4;
+  font-size: 0.82rem;
+`;
+
+const PreviewOpenButton = styled.button`
+  border: none;
+  border-radius: 6px;
+  padding: 0.45rem 0.75rem;
+  background: #2da44e;
+  color: #ffffff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover {
+    background: #3fb950;
+  }
+`;
+
 const EmptyState = styled.div`
   display: flex;
   flex-direction: column;
@@ -231,77 +304,11 @@ const EmptyState = styled.div`
   }
 `;
 
-const DiffPanel = styled.section`
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  padding: 0.9rem;
-  border: 1px solid #3e3e42;
-  border-radius: 10px;
-  background: linear-gradient(180deg, rgba(14, 99, 156, 0.18), rgba(30, 30, 30, 0.92));
-`;
-
-const DiffPanelHeader = styled.div`
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-`;
-
-const DiffPanelTitle = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-
-  h2 {
-    font-size: 0.98rem;
-    font-weight: 600;
-    color: #ffffff;
-  }
-
-  p {
-    font-size: 0.8rem;
-    color: #9da4ad;
-    line-height: 1.4;
-  }
-`;
-
-const DiffStatusBadge = styled.span<{ $tone: 'idle' | 'success' | 'warning' | 'error' }>`
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0.35rem 0.6rem;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  white-space: nowrap;
-  border: 1px solid
-    ${props => props.$tone === 'success' ? '#2da44e' : props.$tone === 'warning' ? '#d29922' : props.$tone === 'error' ? '#f85149' : '#3e3e42'};
-  color: ${props => props.$tone === 'success' ? '#7ee787' : props.$tone === 'warning' ? '#f2cc60' : props.$tone === 'error' ? '#ffa198' : '#c9d1d9'};
-  background: ${props => props.$tone === 'success' ? 'rgba(45, 164, 78, 0.14)' : props.$tone === 'warning' ? 'rgba(210, 153, 34, 0.12)' : props.$tone === 'error' ? 'rgba(248, 81, 73, 0.12)' : 'rgba(110, 118, 129, 0.12)'};
-`;
-
-const DiffPanelBody = styled.pre`
-  margin: 0;
-  padding: 0.9rem;
-  border-radius: 8px;
-  background: #0f111a;
-  border: 1px solid #2d333b;
-  color: #c9d1d9;
-  font-size: 0.8rem;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow: auto;
-  max-height: 240px;
-`;
-
 interface Message {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
-  thinkingSteps?: string[];
 }
 
 interface Attachment {
@@ -309,13 +316,10 @@ interface Attachment {
   type: 'image' | 'code';
   name: string;
   data: string;
-}
-
-interface DiffState {
-  title: string;
-  details: string;
-  content: string;
-  tone: 'idle' | 'success' | 'warning' | 'error';
+  fileName?: string;
+  language?: string;
+  lineStart?: number;
+  lineEnd?: number;
 }
 
 export default function EditorScreen() {
@@ -324,26 +328,37 @@ export default function EditorScreen() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [pendingCode, setPendingCode] = useState<Attachment | null>(null);
   const [isThinking, setIsThinking] = useState(false);
-  const [thinkingSteps, setThinkingSteps] = useState<string[]>([]);
-  const [snapshotSummary, setSnapshotSummary] = useState('로그인하면 현재 열린 코드의 스냅샷을 저장합니다.');
-  const [diffState, setDiffState] = useState<DiffState>({
-    title: 'diff 대기 중',
-    details: 'Ctrl+S를 누르면 저장된 기준 코드와 현재 코드의 차이를 보여줍니다.',
-    content: '로그인 후 기준 코드가 저장되면 여기에 diff가 표시됩니다.',
-    tone: 'idle',
-  });
+  const [thinkingText, setThinkingText] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [previewMarkdown, setPreviewMarkdown] = useState('');
+  const assistantDraftIdRef = useRef<string | null>(null);
+  const isComposingRef = useRef(false);
+  const sendLockRef = useRef(false);
+
+  const openPreview = () => {
+    if (!previewMarkdown.trim()) {
+      return;
+    }
+    window.vscode?.postMessage({
+      type: 'openPreview',
+      markdown: previewMarkdown,
+    });
+  };
 
   // VS Code API 초기화
   useEffect(() => {
     if (typeof window.acquireVsCodeApi === 'function' && !window.vscode) {
       window.vscode = window.acquireVsCodeApi();
     }
-
-    window.vscode?.postMessage({ type: 'requestSnapshotState' });
   }, []);
 
   // VS Code extension으로부터 메시지 받기
   useEffect(() => {
+    const matchesDraft = (msg: { draftId?: string }) => {
+      const id = typeof msg.draftId === 'string' ? msg.draftId : undefined;
+      return !id || id === assistantDraftIdRef.current;
+    };
+
     const handleMessage = (event: MessageEvent) => {
       const message = event.data;
 
@@ -354,63 +369,137 @@ export default function EditorScreen() {
           type: 'code',
           name: `${message.fileName} (줄 ${message.lineStart}-${message.lineEnd})`,
           data: message.code,
+          fileName: message.fileName,
+          language: message.language,
+          lineStart: message.lineStart,
+          lineEnd: message.lineEnd,
         };
         setPendingCode(tempAttachment);
         return;
       }
 
-      if (message.type === 'snapshotReady') {
-        setSnapshotSummary(`${message.fileName} 기준 코드를 저장했습니다.`);
-        setDiffState({
-          title: `${message.fileName} 저장 기준 준비됨`,
-          details: `파일: ${message.filePath ?? message.fileName}`,
-          content: '이후 Ctrl+S를 누르면 baseline과 현재 코드의 diff가 여기에 표시됩니다.',
-          tone: 'success',
+      if (message.type === 'llmStreamStarted') {
+        if (!matchesDraft(message)) {
+          return;
+        }
+        setIsThinking(true);
+        setIsStreaming(true);
+        setThinkingText('');
+        return;
+      }
+
+      if (message.type === 'llmThinkingChunk') {
+        if (!matchesDraft(message)) {
+          return;
+        }
+        if (typeof message.aggregate === 'string') {
+          setThinkingText(message.aggregate);
+        }
+        return;
+      }
+
+      if (message.type === 'llmAssistantChunk') {
+        if (!matchesDraft(message)) {
+          return;
+        }
+        if (typeof message.aggregate !== 'string') {
+          return;
+        }
+
+        const draftId = assistantDraftIdRef.current;
+        if (!draftId) {
+          return;
+        }
+
+        setMessages(prev => {
+          const exists = prev.some(msg => msg.id === draftId);
+          if (!exists) {
+            return [
+              ...prev,
+              {
+                id: draftId,
+                role: 'assistant' as const,
+                content: message.aggregate,
+                timestamp: new Date(),
+              },
+            ];
+          }
+
+          return prev.map(msg =>
+            msg.id === draftId
+              ? {
+                  ...msg,
+                  content: message.aggregate,
+                }
+              : msg,
+          );
         });
         return;
       }
 
-      if (message.type === 'documentDiff') {
-        setSnapshotSummary(`${message.fileName} 저장 완료. diff를 갱신했습니다.`);
-        setDiffState({
-          title: `${message.fileName} diff`,
-          details: `마지막 저장: ${new Date(message.savedAt).toLocaleString('ko-KR')}`,
-          content: message.patch || 'diff를 생성했지만 결과가 비어 있습니다.',
-          tone: 'warning',
-        });
+      if (message.type === 'llmPreviewChunk') {
+        if (!matchesDraft(message)) {
+          return;
+        }
+        if (typeof message.aggregate === 'string' && message.aggregate.trim()) {
+          setPreviewMarkdown(message.aggregate);
+        }
         return;
       }
 
-      if (message.type === 'documentUnchanged') {
-        setSnapshotSummary(`${message.fileName} 저장 완료. 변경 사항이 없습니다.`);
-        setDiffState({
-          title: `${message.fileName} 변경 없음`,
-          details: '저장된 기준 코드와 현재 코드가 동일합니다.',
-          content: '현재 저장된 코드와 스냅샷이 완전히 같습니다.',
-          tone: 'idle',
-        });
+      if (message.type === 'llmStreamDone') {
+        if (!matchesDraft(message)) {
+          return;
+        }
+        setIsThinking(false);
+        setIsStreaming(false);
+        setThinkingText('');
+        assistantDraftIdRef.current = null;
+        sendLockRef.current = false;
+        if (typeof message.previewMarkdown === 'string' && message.previewMarkdown.trim()) {
+          setPreviewMarkdown(message.previewMarkdown);
+        }
         return;
       }
 
-      if (message.type === 'snapshotError') {
-        setSnapshotSummary(message.message);
-        setDiffState({
-          title: '기준 코드 저장 실패',
-          details: '활성 편집기를 찾지 못했습니다.',
-          content: message.message,
-          tone: 'error',
-        });
-        return;
-      }
+      if (message.type === 'llmStreamError') {
+        if (!matchesDraft(message)) {
+          return;
+        }
+        setIsThinking(false);
+        setIsStreaming(false);
+        setThinkingText('');
 
-      if (message.type === 'snapshotMissing') {
-        setSnapshotSummary(message.message);
-        setDiffState({
-          title: '기준 코드 대기 중',
-          details: '로그인 후 기준 코드를 저장해야 diff를 볼 수 있습니다.',
-          content: message.message,
-          tone: 'idle',
-        });
+        if (message.isCanceled) {
+          const draftId = assistantDraftIdRef.current;
+          setMessages(prev =>
+            prev.filter(msg => msg.id !== draftId || msg.content.trim().length > 0),
+          );
+          assistantDraftIdRef.current = null;
+          sendLockRef.current = false;
+          return;
+        }
+
+        const errorText =
+          typeof message.message === 'string' && message.message
+            ? message.message
+            : '스트림 처리 중 오류가 발생했습니다.';
+        const draftId = assistantDraftIdRef.current;
+        if (draftId) {
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.id === draftId
+                ? {
+                    ...msg,
+                    content: `오류: ${errorText}`,
+                  }
+                : msg,
+            ),
+          );
+        }
+
+        assistantDraftIdRef.current = null;
+        sendLockRef.current = false;
       }
     };
 
@@ -419,56 +508,51 @@ export default function EditorScreen() {
   }, []);
 
   const handleSend = () => {
-    if (!input.trim() && attachments.length === 0) return;
+    if (sendLockRef.current || isStreaming) {
+      return;
+    }
+    if (!input.trim() && attachments.length === 0) {
+      return;
+    }
+
+    const fallbackPrompt = '첨부된 내용을 참고해 블로그 글을 작성해주세요.';
+    const prompt = input.trim() || fallbackPrompt;
+
+    const attachmentPayload = attachments.map(att => ({
+      type: att.type,
+      name: att.name,
+      data: att.data,
+      fileName: att.fileName,
+      language: att.language,
+      lineStart: att.lineStart,
+      lineEnd: att.lineEnd,
+    }));
 
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: input,
+      content: input.trim() || '(첨부 코드 기반 요청)',
       timestamp: new Date(),
     };
 
+    const draftId = `assistant-${Date.now()}`;
+
+    sendLockRef.current = true;
     setMessages(prev => [...prev, userMessage]);
+    assistantDraftIdRef.current = draftId;
     setInput('');
     setAttachments([]);
     setPendingCode(null);
-
-    // LLM 사고 과정 시뮬레이션
     setIsThinking(true);
-    setThinkingSteps([]);
+    setThinkingText('');
+    setIsStreaming(true);
 
-    const steps = [
-      '사용자 요청 분석 중...',
-      '코드 컨텍스트 이해하기...',
-      '블로그 구조 설계 중...',
-      '마크다운 형식으로 변환 중...',
-      '최종 검토 중...'
-    ];
-
-    steps.forEach((step, index) => {
-      setTimeout(() => {
-        setThinkingSteps(prev => [...prev, step]);
-      }, index * 800);
+    window.vscode?.postMessage({
+      type: 'sendPrompt',
+      prompt,
+      attachments: attachmentPayload,
+      draftId,
     });
-
-    // 완성 후 미리보기 띄우기
-    setTimeout(() => {
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: '블로그 포스트가 생성되었습니다! 미리보기를 확인해주세요.',
-        timestamp: new Date(),
-        thinkingSteps: steps,
-      };
-      setMessages(prev => [...prev, aiMessage]);
-      setIsThinking(false);
-      setThinkingSteps([]);
-
-      // 미리보기 패널 열기 (VS Code extension에 메시지 전송)
-      if (window.vscode) {
-        window.vscode.postMessage({ type: 'openPreview' });
-      }
-    }, steps.length * 800 + 500);
   };
 
 
@@ -491,26 +575,6 @@ export default function EditorScreen() {
   return (
     <EditorContainer>
       <Content>
-        <DiffPanel>
-          <DiffPanelHeader>
-            <DiffPanelTitle>
-              <h2>{diffState.title}</h2>
-              <p>{diffState.details}</p>
-            </DiffPanelTitle>
-            <DiffStatusBadge $tone={diffState.tone}>
-              {diffState.tone === 'success'
-                ? 'baseline 저장'
-                : diffState.tone === 'warning'
-                  ? 'diff 생성'
-                  : diffState.tone === 'error'
-                    ? '에러'
-                    : '대기 중'}
-            </DiffStatusBadge>
-          </DiffPanelHeader>
-          <div style={{ fontSize: '0.82rem', color: '#9da4ad' }}>{snapshotSummary}</div>
-          <DiffPanelBody>{diffState.content}</DiffPanelBody>
-        </DiffPanel>
-
         <ConversationArea>
           {messages.length === 0 ? (
             <EmptyState>
@@ -522,7 +586,11 @@ export default function EditorScreen() {
             </EmptyState>
           ) : (
             <>
-              {messages.map(msg => (
+              {messages
+                .filter(
+                  msg => msg.role !== 'assistant' || msg.content.trim().length > 0,
+                )
+                .map(msg => (
                 <Message key={msg.id} role={msg.role}>
                   <MessageHeader>
                     {msg.role === 'user' ? (
@@ -536,7 +604,17 @@ export default function EditorScreen() {
                       </svg>
                     )}
                   </MessageHeader>
-                  <MessageContent>{msg.content}</MessageContent>
+                  {msg.role === 'assistant' ? (
+                    msg.content.trim() ? (
+                    <MessageContent
+                      dangerouslySetInnerHTML={{
+                        __html: markdownToHtml(msg.content),
+                      }}
+                    />
+                    ) : null
+                  ) : (
+                    <MessageContent>{msg.content}</MessageContent>
+                  )}
                 </Message>
               ))}
               {isThinking && (
@@ -549,8 +627,11 @@ export default function EditorScreen() {
                     </svg>
                     <span>블로그 포스트를 생성하고 있습니다...</span>
                   </div>
-                  {thinkingSteps.map((step, index) => (
-                    <ThinkingStep key={index}>
+                  {(thinkingText.split('\n').filter(Boolean).length > 0
+                    ? thinkingText.split('\n').filter(Boolean)
+                    : ['스트림 이벤트 대기 중...']
+                  ).map((step, index) => (
+                    <ThinkingStep key={`${step}-${index}`}>
                       <span>→</span>
                       <span>{step}</span>
                     </ThinkingStep>
@@ -561,6 +642,15 @@ export default function EditorScreen() {
           )}
         </ConversationArea>
         
+        {previewMarkdown.trim() ? (
+          <PreviewBar>
+            <span>블로그 초안이 준비되었습니다. 미리보기에서 편집 후 발행하세요.</span>
+            <PreviewOpenButton type="button" onClick={openPreview}>
+              블로그 미리보기 · 만들기
+            </PreviewOpenButton>
+          </PreviewBar>
+        ) : null}
+
         <InputSection>
           {(attachments.length > 0 || pendingCode) && (
             <AttachmentsRow>
@@ -592,16 +682,36 @@ export default function EditorScreen() {
           <InputRow>
             <TextInput
               value={input}
+              disabled={isStreaming}
               onChange={(e) => setInput(e.target.value)}
+              onCompositionStart={() => {
+                isComposingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                isComposingRef.current = false;
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
+                  if (
+                    e.nativeEvent.isComposing ||
+                    isComposingRef.current ||
+                    sendLockRef.current ||
+                    isStreaming
+                  ) {
+                    return;
+                  }
                   handleSend();
                 }
               }}
               placeholder="블로그 주제나 코드를 입력하세요... (Shift+Enter로 줄바꿈)"
             />
-            <SendButton onClick={handleSend} disabled={!input.trim() && attachments.length === 0}>
+            <SendButton
+              onClick={handleSend}
+              disabled={
+                isStreaming || (!input.trim() && attachments.length === 0)
+              }
+            >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M22 2L11 13" stroke="#fff" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
                 <path d="M22 2l-7 20-4-9-9-4 20-7z" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="#fff" fillOpacity="0.2"/>

@@ -38,6 +38,10 @@
       {
         "command": "clog.sendCodeToWebview",
         "title": "Send Code to Blog Creator"
+      },
+      {
+        "command": "clog.runApiProbe",
+        "title": "Clog: Run API Integration Probe"
       }
     ],
     "menus": {
@@ -56,7 +60,27 @@
         "mac": "cmd+shift+b",
         "when": "editorTextFocus && editorHasSelection"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Clog",
+      "properties": {
+        "clog.apiBaseUrl": {
+          "type": "string",
+          "default": "https://clog.r-e.kr",
+          "description": "CLOG backend API base URL."
+        },
+        "clog.blogPublicBaseUrl": {
+          "type": "string",
+          "default": "http://clog-frontend-project.s3-website.ap-northeast-2.amazonaws.com",
+          "description": "Published blog web app origin (S3/CloudFront). Links use /#/blog/{id}. API domain(clog.r-e.kr)과 별도."
+        },
+        "clog.maxProjectSyncFiles": {
+          "type": "number",
+          "default": 10000,
+          "description": "Initial sync: max workspace files to upload (server APP_PROJECT_MAX_FILES must be >= this)."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "pnpm run compile",
