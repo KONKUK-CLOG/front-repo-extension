@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto";
 import * as path from "path";
 import * as vscode from "vscode";
 
 /** 서버 `app.project.max-file-bytes` 와 맞춤 (기본 50KB) */
 export const MAX_FILE_BYTES = 51_200;
+
+/** diff·baseline 비교 시 CRLF/LF 불일치로 패치 적용이 실패하지 않도록 통일 */
+export function normalizeSyncLineEndings(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
 
 const ALL_FILES_GLOB = "**/*";
 
@@ -106,6 +112,19 @@ export function getDefaultMaxSyncFiles(): number {
   return vscode.workspace
     .getConfiguration("clog")
     .get<number>("maxProjectSyncFiles", 10_000);
+}
+
+/**
+ * CLOG 서버 프로젝트 `name`.
+ * basename만 쓰면 `/a/foo`와 `/b/foo`가 같은 프로젝트(및 파일 한도)를 공유하므로 경로 해시를 붙입니다.
+ */
+export function resolveWorkspaceProjectName(workspaceRootFsPath: string): string {
+  const base = path.basename(workspaceRootFsPath) || "workspace";
+  const digest = createHash("sha256")
+    .update(workspaceRootFsPath)
+    .digest("hex")
+    .slice(0, 8);
+  return `${base}__${digest}`;
 }
 
 export function toWorkspaceRelativePath(

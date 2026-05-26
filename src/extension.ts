@@ -16,6 +16,13 @@ export function activate(context: vscode.ExtensionContext) {
 
   // 저장 시 diff 생성 등록
   registerSaveListener(context, provider);
+
+  // 다른 폴더를 열면 해당 워크스페이스용 CLOG 프로젝트로 전환
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      void provider.handleWorkspaceFoldersChanged();
+    }),
+  );
 }
 
 /**

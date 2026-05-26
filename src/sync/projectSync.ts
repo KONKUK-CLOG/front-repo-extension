@@ -18,14 +18,34 @@ import {
   collectWorkspaceSourceFiles,
   getWorkspaceFolder,
   isSyncableFileContent,
+  normalizeSyncLineEndings,
   toWorkspaceRelativePath,
 } from "./workspaceFiles";
+
+/** 서버 unified diff 파서와 맞추기 (Index:/==== 헤더 제외) */
+const UNIFIED_DIFF_PATCH_OPTIONS = {
+  headerOptions: {
+    includeIndex: false,
+    includeUnderline: false,
+    includeFileHeaders: true,
+  },
+};
 
 export interface ProjectSyncResult {
   cache: ProjectSyncCache;
   created: number;
   skipped: number;
   failed: string[];
+  /** 서버 `프로젝트당 파일 개수 한도`에 걸려 신규 POST를 중단한 경우 */
+  fileQuotaExceeded: boolean;
+}
+
+function isProjectFileQuotaError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 400 &&
+    error.message.includes("파일 개수 한도")
+  );
 }
 
 function buildRemoteByPath(
@@ -110,6 +130,7 @@ export async function syncEntireWorkspaceToServer(
   let created = 0;
   let skipped = 0;
   const failed: string[] = [];
+  let fileQuotaExceeded = false;
 
   log(
     `[Initial Sync] workspace files=${localFiles.length} skippedCollect=${skippedCollect} remote=${remoteFiles.length}`,
@@ -129,6 +150,11 @@ export async function syncEntireWorkspaceToServer(
 
     try {
       if (!remote) {
+        if (fileQuotaExceeded) {
+          failed.push(local.relativePath);
+          continue;
+        }
+
         log(`[Initial Sync] >>> POST .../files path=${local.relativePath}`);
         try {
           const saved = await withSyncRetry(
@@ -169,6 +195,14 @@ export async function syncEntireWorkspaceToServer(
               skipped += 1;
               continue;
             }
+          }
+          if (isProjectFileQuotaError(error)) {
+            fileQuotaExceeded = true;
+            failed.push(local.relativePath);
+            log(
+              `[Initial Sync] 프로젝트 파일 개수 한도 도달 — 신규 POST 중단 (서버 remote=${remoteFiles.length}개)`,
+            );
+            continue;
           }
           throw error;
         }
@@ -216,6 +250,9 @@ export async function syncEntireWorkspaceToServer(
       });
       skipped += 1;
     } catch (error) {
+      if (isProjectFileQuotaError(error)) {
+        fileQuotaExceeded = true;
+      }
       const message =
         error instanceof ApiError
           ? error.message
@@ -225,7 +262,13 @@ export async function syncEntireWorkspaceToServer(
     }
   }
 
-  return { cache: nextCache, created, skipped, failed };
+  if (fileQuotaExceeded) {
+    log(
+      `[Initial Sync] 안내: 서버 프로젝트당 파일 개수 한도(기본 약 200개)에 도달했습니다. 불필요한 파일 삭제·새 프로젝트 생성·관리자 한도 상향이 필요할 수 있습니다.`,
+    );
+  }
+
+  return { cache: nextCache, created, skipped, failed, fileQuotaExceeded };
 }
 
 export interface FileDiffSyncResult {
@@ -249,29 +292,52 @@ export async function syncSavedFileDiffToServer(
     return { cache, result: { updated: false } };
   }
 
-  if (entry.baselineContent === currentContent) {
+  const baselineNorm = normalizeSyncLineEndings(entry.baselineContent);
+  const currentNorm = normalizeSyncLineEndings(currentContent);
+
+  if (baselineNorm === currentNorm) {
     log(`[Ctrl+S] SKIP — 변경 없음: ${relativePath}`);
     return { cache, result: { updated: false } };
   }
 
   const patch = createPatch(
     relativePath,
-    entry.baselineContent,
-    currentContent,
+    baselineNorm,
+    currentNorm,
     "synced baseline",
     "editor save",
+    UNIFIED_DIFF_PATCH_OPTIONS,
   );
 
   log(`[Ctrl+S] >>> PUT .../files/${entry.fileId} contentDiff`);
   log(`[Ctrl+S] diff(patch):\n${patch}`);
 
-  const saved = await updateProjectFileDiff(
-    client,
-    cache.projectId,
-    entry.fileId,
-    patch,
-    language,
-  );
+  let saved: ProjectFileResponse;
+  try {
+    saved = await updateProjectFileDiff(
+      client,
+      cache.projectId,
+      entry.fileId,
+      patch,
+      language,
+    );
+  } catch (error) {
+    const diffRejected =
+      error instanceof ApiError &&
+      error.status === 400 &&
+      (error.message.includes("diff") ||
+        error.message.includes("변경분"));
+    if (!diffRejected) {
+      throw error;
+    }
+    log(
+      `[Ctrl+S] diff 적용 실패(400) → full content PUT 폴백 path=${relativePath}`,
+    );
+    saved = await updateProjectFile(client, cache.projectId, entry.fileId, {
+      content: currentNorm,
+      language,
+    });
+  }
 
   upsertCachedFileEntry(
     cache,
@@ -279,7 +345,7 @@ export async function syncSavedFileDiffToServer(
       fileId: entry.fileId,
       relativePath,
       language,
-      baselineContent: currentContent,
+      baselineContent: currentNorm,
     },
     patch,
   );

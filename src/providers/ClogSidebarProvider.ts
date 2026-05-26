@@ -10,6 +10,7 @@ import { getApiBaseUrl } from "../api/config";
 import { ensureWorkspaceProject } from "../api/projects";
 import {
   getCachedFileEntry,
+  isProjectSyncCacheValid,
   loadProjectSyncCache,
   saveProjectSyncCache,
   ProjectSyncCache,
@@ -20,7 +21,10 @@ import {
   syncEntireWorkspaceToServer,
   syncSavedFileDiffToServer,
 } from "../sync/projectSync";
-import { getWorkspaceFolder } from "../sync/workspaceFiles";
+import {
+  getWorkspaceFolder,
+  resolveWorkspaceProjectName,
+} from "../sync/workspaceFiles";
 import { getUserIdFromToken } from "../api/jwt";
 import { buildChatSendBody, isChatSessionNotFoundMessage } from "../api/chat";
 import { runApiIntegrationProbe } from "../api/apiProbe";
@@ -214,9 +218,17 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     if (isLoggedIn && accessToken) {
+      await this._ensureWorkspaceProjectForCurrentFolder();
+      const folder = getWorkspaceFolder();
       const cache =
         this._projectSyncCache ?? loadProjectSyncCache(this._projectSyncCacheUri);
-      if (!cache || cache.projectId !== this._tokenStorage.getProjectId()) {
+      if (
+        !isProjectSyncCacheValid(
+          cache,
+          this._tokenStorage.getProjectId(),
+          folder?.uri.fsPath,
+        )
+      ) {
         void this._syncEntireWorkspace();
       }
     }
@@ -313,22 +325,69 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * VS Code에서 다른 폴더를 열었을 때 호출 (extension.ts).
+   */
+  public async handleWorkspaceFoldersChanged(): Promise<void> {
+    const accessToken = await this._tokenStorage.getAccessToken();
+    if (!accessToken || isJwtExpired(accessToken)) {
+      return;
+    }
+
+    const previousProjectId = this._tokenStorage.getProjectId();
+    await this._ensureWorkspaceProjectForCurrentFolder();
+    const folder = getWorkspaceFolder();
+    const cache =
+      this._projectSyncCache ?? loadProjectSyncCache(this._projectSyncCacheUri);
+
+    if (
+      previousProjectId !== this._tokenStorage.getProjectId() ||
+      !isProjectSyncCacheValid(
+        cache,
+        this._tokenStorage.getProjectId(),
+        folder?.uri.fsPath,
+      )
+    ) {
+      this._debugLog(
+        "[Workspace] 폴더 변경 — 프로젝트/캐시 재동기화",
+      );
+      this._projectSyncCache = null;
+      void this._syncEntireWorkspace();
+    }
+  }
+
+  private async _ensureWorkspaceProjectForCurrentFolder(): Promise<void> {
+    const folder = getWorkspaceFolder();
+    if (!folder) {
+      return;
+    }
+
+    const previousProjectId = this._tokenStorage.getProjectId();
+    await this._initializeWorkspaceSession();
+    const projectId = this._tokenStorage.getProjectId();
+    const projectName = resolveWorkspaceProjectName(folder.uri.fsPath);
+
+    if (previousProjectId && previousProjectId !== projectId) {
+      this._debugLog(
+        `[Workspace] projectId 변경 ${previousProjectId} → ${projectId} (name=${projectName})`,
+      );
+      this._projectSyncCache = null;
+    }
+  }
+
   private async _initializeWorkspaceSession() {
-    const workspaceName = this._resolveWorkspaceName();
+    const folder = getWorkspaceFolder();
+    const workspaceName = folder
+      ? resolveWorkspaceProjectName(folder.uri.fsPath)
+      : "clog-extension-workspace";
+
+    this._debugLog(`[Workspace] CLOG project name=${workspaceName}`);
+
     const project = await ensureWorkspaceProject(
       this._apiClient,
       workspaceName,
     );
     await this._tokenStorage.setProjectId(project.id);
-  }
-
-  private _resolveWorkspaceName(): string {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (folder) {
-      return path.basename(folder.uri.fsPath);
-    }
-
-    return "clog-extension-workspace";
   }
 
   private async _syncEntireWorkspace(): Promise<void> {
@@ -358,9 +417,20 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    const workspaceRoot = workspaceFolder.uri.fsPath;
+    let existing = this._projectSyncCache ?? loadProjectSyncCache(this._projectSyncCacheUri);
+    if (
+      !isProjectSyncCacheValid(existing, projectId, workspaceRoot)
+    ) {
+      this._debugLog(
+        "[Initial Sync] 캐시 무효화 (다른 워크스페이스 또는 프로젝트)",
+      );
+      existing = null;
+      this._projectSyncCache = null;
+    }
+
     try {
-      const existing = this._projectSyncCache ?? loadProjectSyncCache(this._projectSyncCacheUri);
-      const { cache, created, skipped, failed } =
+      const { cache, created, skipped, failed, fileQuotaExceeded } =
         await syncEntireWorkspaceToServer(
           this._apiClient,
           projectId,
@@ -372,10 +442,14 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
       this._projectSyncCache = cache;
 
       this._debugLog(
-        `[Initial Sync] 완료 POST=${created} cached=${Object.keys(cache.files).length} skipped=${skipped} failed=${failed.length}`,
+        `[Initial Sync] 완료 POST=${created} cached=${Object.keys(cache.files).length} skipped=${skipped} failed=${failed.length}${fileQuotaExceeded ? " quotaExceeded=true" : ""}`,
       );
 
-      if (failed.length > 0) {
+      if (fileQuotaExceeded) {
+        void vscode.window.showWarningMessage(
+          "Clog: 서버 프로젝트당 파일 개수 한도에 도달해 일부 파일을 업로드하지 못했습니다. 웹/관리자에서 오래된 파일을 정리하거나 새 프로젝트로 작업해 주세요.",
+        );
+      } else if (failed.length > 0) {
         this._debugLog(
           `[Initial Sync] 실패 파일: ${failed.slice(0, 10).join(", ")}${failed.length > 10 ? " …" : ""}`,
         );
@@ -436,16 +510,29 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    await this._ensureWorkspaceProjectForCurrentFolder();
+    projectId = this._tokenStorage.getProjectId() ?? projectId;
+
+    const workspaceFolder = getWorkspaceFolder();
+    const workspaceRoot = workspaceFolder?.uri.fsPath;
+
     let cache =
       this._projectSyncCache ?? loadProjectSyncCache(this._projectSyncCacheUri);
-    if (!cache || cache.projectId !== projectId) {
+    if (!isProjectSyncCacheValid(cache, projectId, workspaceRoot)) {
+      await this._ensureWorkspaceProjectForCurrentFolder();
+      const nextProjectId = this._tokenStorage.getProjectId();
+      if (!nextProjectId) {
+        this._debugLog("[Ctrl+S] SKIP — projectId 없음");
+        return;
+      }
       this._debugLog("[Ctrl+S] 캐시 없음 → Initial Sync 재시도");
       await this._syncEntireWorkspace();
       cache =
         this._projectSyncCache ?? loadProjectSyncCache(this._projectSyncCacheUri);
+      projectId = nextProjectId;
     }
 
-    if (!cache || cache.projectId !== projectId) {
+    if (!isProjectSyncCacheValid(cache, projectId, workspaceRoot) || !cache) {
       this._debugLog("[Ctrl+S] SKIP — Initial Sync 후에도 캐시 없음");
       void vscode.window.showWarningMessage(
         "Clog: 워크스페이스 동기화에 실패했습니다. Output(Clog API Debug)를 확인해주세요.",
@@ -453,7 +540,6 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const workspaceFolder = getWorkspaceFolder();
     if (!workspaceFolder) {
       this._debugLog("[Ctrl+S] SKIP — 워크스페이스 폴더 없음");
       return;

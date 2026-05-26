@@ -47,6 +47,19 @@ export function getCachedFileEntry(
   return cache.files[relativePath];
 }
 
+export function isProjectSyncCacheValid(
+  cache: ProjectSyncCache | null | undefined,
+  projectId: string | undefined,
+  workspaceRoot: string | undefined,
+): boolean {
+  if (!cache || !projectId || !workspaceRoot) {
+    return false;
+  }
+  return (
+    cache.projectId === projectId && cache.workspaceRoot === workspaceRoot
+  );
+}
+
 export function upsertCachedFileEntry(
   cache: ProjectSyncCache,
   entry: CachedFileEntry,
