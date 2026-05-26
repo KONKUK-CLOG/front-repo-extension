@@ -7,6 +7,7 @@ import { ApiError, ClogApiClient, formatHttpErrorMessage } from "../api/client";
 import { isJwtExpired } from "../api/jwt";
 import { formatPublishedBlogUrl } from "../api/blogUrl";
 import { getApiBaseUrl } from "../api/config";
+import { CLOG_API_DEBUG } from "../api/debug";
 import { ensureWorkspaceProject } from "../api/projects";
 import {
   getCachedFileEntry,
@@ -66,8 +67,9 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
       this._context.secrets,
       this._context.globalState,
     );
-    this._apiClient = new ClogApiClient(this._tokenStorage, (line) =>
-      this._debugLog(line),
+    this._apiClient = new ClogApiClient(
+      this._tokenStorage,
+      CLOG_API_DEBUG ? (line) => this._debugLog(line) : undefined,
     );
     this._projectSyncCacheUri = vscode.Uri.joinPath(
       this._context.storageUri ?? this._context.globalStorageUri,
@@ -237,6 +239,14 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private _debugLog(line: string) {
+    if (!CLOG_API_DEBUG) {
+      return;
+    }
+    const stamp = new Date().toISOString();
+    this._debugOutput.appendLine(`${stamp} ${line}`);
+  }
+
+  private _probeLog(line: string) {
     const stamp = new Date().toISOString();
     this._debugOutput.appendLine(`${stamp} ${line}`);
   }
@@ -669,12 +679,15 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
     session: vscode.AuthenticationSession,
     clogAccessToken: string,
   ) {
+    if (!CLOG_API_DEBUG) {
+      return;
+    }
     this._debugOutput.show(true);
     this._debugLog(`[Clog Auth] GitHub account: ${session.account.label}`);
     this._debugLog(`[Clog Auth] GitHub scopes: ${session.scopes.join(", ")}`);
     this._debugLog(`[Clog Auth] apiBaseUrl: ${getApiBaseUrl()}`);
-    this._debugLog(`[Clog Auth] GitHub accessToken: ${session.accessToken}`);
-    this._debugLog(`[Clog Auth] CLOG JWT accessToken: ${clogAccessToken}`);
+    // this._debugLog(`[Clog Auth] GitHub accessToken: ${session.accessToken}`);
+    // this._debugLog(`[Clog Auth] CLOG JWT accessToken: ${clogAccessToken}`);
     this._debugLog(
       `[Clog Auth] CLOG userId (JWT sub): ${getUserIdFromToken(clogAccessToken) ?? "unknown"}`,
     );
@@ -947,26 +960,31 @@ export class ClogSidebarProvider implements vscode.WebviewViewProvider {
   /** Command Palette: API 연동 프로브 (Output → Clog API Debug) */
   public async runApiProbe(): Promise<void> {
     this._debugOutput.show(true);
+    const probeClient = new ClogApiClient(
+      this._tokenStorage,
+      (line) => this._probeLog(line),
+      true,
+    );
     const session = await this._getGitHubSession(true);
     if (!session) {
-      this._debugLog("[Probe] GitHub 세션 없음 — 먼저 GitHub 로그인");
+      this._probeLog("[Probe] GitHub 세션 없음 — 먼저 GitHub 로그인");
       return;
     }
 
     let jwt = await this._tokenStorage.getAccessToken();
     if (!jwt) {
-      this._debugLog("[Probe] JWT 없음 — 교환 시도");
+      this._probeLog("[Probe] JWT 없음 — 교환 시도");
       await this._handleGitHubLogin();
       jwt = await this._tokenStorage.getAccessToken();
     }
 
     if (!jwt) {
-      this._debugLog("[Probe] JWT 교환 실패 — 중단");
+      this._probeLog("[Probe] JWT 교환 실패 — 중단");
       return;
     }
 
     await runApiIntegrationProbe(
-      this._apiClient,
+      probeClient,
       session.accessToken,
       this._tokenStorage.getProjectId(),
     );

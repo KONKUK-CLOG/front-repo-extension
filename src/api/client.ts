@@ -1,4 +1,5 @@
 import { getApiBaseUrl } from "./config";
+import { CLOG_API_DEBUG } from "./debug";
 import { TokenStorage } from "./tokenStorage";
 import { ApiResponse } from "./types";
 
@@ -51,9 +52,13 @@ export class ClogApiClient {
   constructor(
     private readonly tokenStorage: TokenStorage,
     private readonly log?: (line: string) => void,
+    private readonly traceEnabled: boolean = CLOG_API_DEBUG,
   ) {}
 
   trace(line: string) {
+    if (!this.traceEnabled) {
+      return;
+    }
     this.log?.(line);
   }
 
